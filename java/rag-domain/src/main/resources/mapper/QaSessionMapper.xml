@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="steveluxor.ragknowledgesystem.mapper.QaSessionMapper">
+
+    <insert id="insert" parameterType="steveluxor.ragknowledgesystem.entity.QaSession" useGeneratedKeys="true" keyProperty="id">
+        insert into qa_session
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="userId != null">user_id,</if>
+            <if test="title != null">title,</if>
+            <if test="createUser != null">create_user,</if>
+            create_time,
+            update_time,
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="userId != null">#{userId},</if>
+            <if test="title != null">#{title},</if>
+            <if test="createUser != null">#{createUser},</if>
+            #{createTime},
+            #{updateTime},
+        </trim>
+    </insert>
+
+    <select id="selectByUserId" resultType="steveluxor.ragknowledgesystem.entity.QaSession">
+        select * from qa_session where user_id = #{userId} order by update_time desc
+    </select>
+
+    <select id="selectById" resultType="steveluxor.ragknowledgesystem.entity.QaSession">
+        select * from qa_session where id = #{id}
+    </select>
+
+    <update id="updateTitle">
+        update qa_session set title = #{title}, update_time = now() where id = #{id} and title is null
+    </update>
+
+    <delete id="deleteById">
+        delete from qa_session where id = #{id}
+    </delete>
+
+</mapper>

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Vector store data
+chroma_db/
+
+# Environment
+.env
+
+# Java
+java/**/target/
+java/*.iml
+
+# Logs
+*.log
+
+# IDE
+.idea/
