@@ -14,10 +14,12 @@ import steveluxor.ragknowledgesystem.common.Result;
 @Component
 public class LoginInterceptor implements HandlerInterceptor {
 
+    // 用于序列化和反序列化 JSON 对象
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
 
     private final JwtUtils jwtUtils;
+
     @Autowired
     public LoginInterceptor(JwtUtils jwtUtils) {
         this.jwtUtils = jwtUtils;
@@ -30,7 +32,7 @@ public class LoginInterceptor implements HandlerInterceptor {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             response.setContentType("application/json;charset=UTF-8");
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-            OBJECT_MAPPER.writeValue(response.getWriter(), Result.fail(401, Constants.USER_NOT_LOGIN));
+            OBJECT_MAPPER.writeValue(response.getWriter(), Result.fail(HttpServletResponse.SC_UNAUTHORIZED, Constants.USER_NOT_LOGIN));
             return false;
         }
 
@@ -43,7 +45,7 @@ public class LoginInterceptor implements HandlerInterceptor {
         } catch (Exception e) {
             response.setContentType("application/json;charset=UTF-8");
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-            OBJECT_MAPPER.writeValue(response.getWriter(), Result.fail(401, Constants.JWT_EXPIRED));
+            OBJECT_MAPPER.writeValue(response.getWriter(), Result.fail(HttpServletResponse.SC_UNAUTHORIZED, Constants.JWT_EXPIRED));
             return false;
         }
     }

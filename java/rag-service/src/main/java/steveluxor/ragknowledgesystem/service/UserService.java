@@ -14,4 +14,6 @@ public interface UserService {
     Result info(String phone);
 
     Result update(UpdateUserDTO updateUserDTO);
+
+    Result delete(Long userId);
 }

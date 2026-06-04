@@ -33,4 +33,10 @@
     <select id="selectByPhone" resultType="steveluxor.ragknowledgesystem.entity.User">
         select * from user where phone = #{phone}
     </select>
+    <select id="selectById" resultType="steveluxor.ragknowledgesystem.entity.User">
+        select * from user where id = #{id}
+    </select>
+    <delete id="deleteById">
+        delete from user where id = #{id}
+    </delete>
 </mapper>

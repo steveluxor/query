@@ -695,6 +695,7 @@ input::placeholder {
     padding: 0 24px 20px;
     display: flex;
     justify-content: flex-end;
+    gap: 12px;
 }
 
 .form-row {
@@ -993,12 +994,53 @@ input::placeholder {
 
 .qa-input-area {
     display: flex;
-    gap: 10px;
+    flex-direction: column;
+    gap: 8px;
     padding-top: 16px;
     border-top: 1px solid var(--gray-100);
 }
 
-.qa-input-area input {
+.qa-toolbar {
+    display: flex;
+    align-items: center;
+}
+
+.qa-strategy-group {
+    display: flex;
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.qa-strategy-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: none;
+    background: var(--gray-50);
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.qa-strategy-btn + .qa-strategy-btn {
+    border-left: 1px solid var(--gray-200);
+}
+
+.qa-strategy-btn.active {
+    background: var(--primary);
+    color: #fff;
+}
+
+.qa-strategy-btn:hover:not(.active) {
+    background: var(--gray-100);
+}
+
+.qa-input-row {
+    display: flex;
+    gap: 10px;
+}
+
+.qa-input-row input {
     flex: 1;
 }
 

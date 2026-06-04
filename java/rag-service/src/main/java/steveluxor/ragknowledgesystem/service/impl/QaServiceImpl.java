@@ -4,9 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
 import steveluxor.ragknowledgesystem.common.Result;
 import steveluxor.ragknowledgesystem.dto.AskRequest;
+import steveluxor.ragknowledgesystem.exception.BizException;
+
+import static steveluxor.ragknowledgesystem.common.Constants.*;
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.entity.QaHistory;
 import steveluxor.ragknowledgesystem.entity.QaSession;
@@ -31,7 +35,7 @@ import java.util.stream.Collectors;
 public class QaServiceImpl implements QaService {
 
     private static final String ASK_PATH = "/qa/ask";
-    private static final Duration TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration TIMEOUT = Duration.ofSeconds(120);
     private static final int TITLE_MAX_LENGTH = 50;
 
     private final String pythonBaseUrl;
@@ -72,6 +76,9 @@ public class QaServiceImpl implements QaService {
             if (!accessibleDocIds.isEmpty()) {
                 pythonReq.put("document_ids", accessibleDocIds);
             }
+            if (request.getStrategy() != null) {
+                pythonReq.put("strategy", request.getStrategy());
+            }
 
             // 获取最近对话历史，传递给 Python 端用于查询改写 + 上下文理解
             if (request.getSessionId() != null) {
@@ -105,7 +112,7 @@ public class QaServiceImpl implements QaService {
             if (httpResp.statusCode() != 200) {
                 String errorBody = httpResp.body();
                 log.error("Python AI 服务返回异常: status={}, body={}", httpResp.statusCode(), errorBody);
-                return Result.fail("AI 服务返回错误: " + errorBody);
+                throw new BizException(AI_SERVICE_ERROR_PREFIX + errorBody);
             }
 
             Map<String, Object> pythonResp = objectMapper.readValue(httpResp.body(), Map.class);
@@ -137,10 +144,10 @@ public class QaServiceImpl implements QaService {
             return Result.ok(history);
         } catch (java.net.ConnectException e) {
             log.error("Python AI 服务连接失败: {}", e.getMessage());
-            return Result.fail("AI 服务未启动，请先启动 Python 服务");
+            throw new BizException(AI_SERVICE_NOT_STARTED);
         } catch (Exception e) {
             log.error("问答失败", e);
-            return Result.fail("问答处理失败: " + e.getMessage());
+            throw new BizException(QA_PROCESS_FAILED_PREFIX + e.getMessage());
         }
     }
 
@@ -176,7 +183,7 @@ public class QaServiceImpl implements QaService {
                 .filter(h -> h.getId().equals(id))
                 .findFirst().orElse(null);
         if (history == null) {
-            return Result.fail("记录不存在");
+            throw new BizException(QA_RECORD_NOT_EXIST);
         }
         qaHistoryMapper.deleteById(id);
         return Result.ok();
@@ -185,18 +192,19 @@ public class QaServiceImpl implements QaService {
     @Override
     public Result deleteBatch(List<Long> ids, Long userId) {
         if (ids == null || ids.isEmpty()) {
-            return Result.fail("请选择要删除的记录");
+            throw new BizException(QA_SELECT_RECORD_FIRST);
         }
         qaHistoryMapper.deleteBatch(ids, userId);
         return Result.ok();
     }
 
+    @Transactional(rollbackFor = Exception.class)
     @Override
     public Result deleteSession(Long sessionId) {
         Long userId = CurrentUser.get();
         QaSession session = qaSessionMapper.selectById(sessionId);
         if (session == null || !session.getUserId().equals(userId)) {
-            return Result.fail("会话不存在");
+            throw new BizException(QA_SESSION_NOT_EXIST);
         }
         qaHistoryMapper.deleteBySessionId(sessionId, userId);
         qaSessionMapper.deleteById(sessionId);

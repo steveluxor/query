@@ -36,4 +36,8 @@
         delete from qa_session where id = #{id}
     </delete>
 
+    <delete id="deleteByUserId">
+        delete from qa_session where user_id = #{userId}
+    </delete>
+
 </mapper>

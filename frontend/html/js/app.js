@@ -59,6 +59,7 @@
         // 问答
         qaInput: $('#qaInput'),
         qaSendBtn: $('#qaSendBtn'),
+        qaStrategyGroup: $('#qaStrategyGroup'),
         qaMessages: $('#qaMessages'),
         newSessionBtn: $('#newSessionBtn'),
         sessionList: $('#sessionList'),
@@ -75,6 +76,7 @@
         profileEmail: $('#profileEmail'),
         profilePassword: $('#profilePassword'),
         saveProfileBtn: $('#saveProfileBtn'),
+        deleteAccountBtn: $('#deleteAccountBtn'),
 
         // Toast
         toast: $('#toast'),
@@ -411,6 +413,42 @@
         }
     }
 
+    async function handleDeleteAccount() {
+        if (!confirm('确定要注销账户吗？此操作将永久删除您的所有数据（文档、对话历史等），且无法恢复！')) return;
+        if (!confirm('再次确认：您真的要注销账户吗？')) return;
+
+        try {
+            els.deleteAccountBtn.disabled = true;
+            els.deleteAccountBtn.textContent = '注销中...';
+            await Api.deleteUser(state.userId);
+            els.profileModal.style.display = 'none';
+            showToast('账户已注销', 'success');
+            // 清除状态并返回登录页
+            Api.clearToken();
+            state.user = null;
+            state.userId = null;
+            state.documents = [];
+            state.currentSessionId = null;
+            state.sessions = [];
+            els.phoneInput.value = '';
+            els.codeInput.value = '';
+            if (state.countdownTimer) {
+                clearInterval(state.countdownTimer);
+                state.countdownTimer = null;
+                els.sendCodeBtn.disabled = false;
+                els.sendCodeBtn.textContent = '发送验证码';
+            }
+            els.mainPage.classList.remove('active');
+            els.loginPage.classList.add('active');
+            renderDocumentList();
+        } catch (err) {
+            showToast(err.message || '注销失败', 'error');
+        } finally {
+            els.deleteAccountBtn.disabled = false;
+            els.deleteAccountBtn.textContent = '注销账户';
+        }
+    }
+
     // ============================================
     // 视图切换
     // ============================================
@@ -634,7 +672,10 @@
             qaLoading = true;
             els.qaSendBtn.disabled = true;
 
-            await Api.ask(question, state.currentSessionId);
+            const strategyValues = [null, 'diversity', 'relevance'];
+            const activeBtn = els.qaStrategyGroup.querySelector('.qa-strategy-btn.active');
+            const strategy = strategyValues[parseInt(activeBtn.dataset.value)];
+            await Api.ask(question, state.currentSessionId, strategy);
             // 重新加载历史列表 + 会话列表（标题可能已更新）
             await Promise.all([
                 loadQaHistory(),
@@ -824,6 +865,14 @@
         });
         els.newSessionBtn.addEventListener('click', handleNewSession);
 
+        // 策略按钮组
+        els.qaStrategyGroup.addEventListener('click', (e) => {
+            const btn = e.target.closest('.qa-strategy-btn');
+            if (!btn) return;
+            els.qaStrategyGroup.querySelectorAll('.qa-strategy-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+
         // 会话列表事件委托（切换、删除）
         els.sessionList.addEventListener('click', (e) => {
             const delBtn = e.target.closest('.session-delete');
@@ -867,6 +916,7 @@
         els.profileBtn.addEventListener('click', toggleProfile);
         els.closeProfileBtn.addEventListener('click', toggleProfile);
         els.saveProfileBtn.addEventListener('click', handleSaveProfile);
+        els.deleteAccountBtn.addEventListener('click', handleDeleteAccount);
 
         // 上传
         els.selectFileBtn.addEventListener('click', handleFileSelect);

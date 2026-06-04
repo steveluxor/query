@@ -19,4 +19,6 @@ public interface QaHistoryMapper {
     List<QaHistory> selectBySessionId(@Param("sessionId") Long sessionId, @Param("userId") Long userId);
 
     void deleteBySessionId(@Param("sessionId") Long sessionId, @Param("userId") Long userId);
+
+    void deleteByUserId(Long userId);
 }

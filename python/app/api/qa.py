@@ -24,6 +24,7 @@ async def ask_question(
         top_k=request.top_k,
         document_ids=request.document_ids,
         history=request.history,
+        strategy=request.strategy,
     )
     return AnswerResponse(
         answer=result["answer"],

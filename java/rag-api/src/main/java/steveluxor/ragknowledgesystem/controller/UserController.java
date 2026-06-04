@@ -52,4 +52,14 @@ public class UserController {
         log.info("更新请求:{}",updateUserDTO);
         return userService.update(updateUserDTO);
     }
+
+    /**
+     * 删除用户及其所有关联数据
+     */
+    @DeleteMapping("/delete")
+    public Result delete(@RequestParam Long userId) {
+        log.info("删除用户请求: userId={}", userId);
+        return userService.delete(userId);
+    }
+
 }

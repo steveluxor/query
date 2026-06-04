@@ -1,7 +1,36 @@
 from pathlib import Path
 
+import win32com.client
+import pythoncom
 from langchain_text_splitters.character import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from langchain_core.documents import Document
+
+
+class WordDocLoader:
+    """使用 Word COM 解析旧版 .doc 文件"""
+
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> list[Document]:
+        pythoncom.CoInitialize()
+        word = None
+        doc = None
+        try:
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            doc = word.Documents.Open(str(Path(self.file_path).resolve()))
+            text = doc.Content.Text
+            if not text.strip():
+                return []
+            return [Document(page_content=text)]
+        finally:
+            if doc:
+                doc.Close(False)
+            if word:
+                word.Quit()
+            pythoncom.CoUninitialize()
 
 
 class DocumentProcessor:
@@ -10,11 +39,12 @@ class DocumentProcessor:
     LOADER_MAP = {
         ".pdf": PyPDFLoader,
         ".docx": Docx2txtLoader,
+        ".doc": WordDocLoader,
         ".txt": TextLoader,
         ".md": TextLoader,
     }
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 100):
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,

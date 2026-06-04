@@ -6,6 +6,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import steveluxor.ragknowledgesystem.common.Result;
 
+import static steveluxor.ragknowledgesystem.common.Constants.SERVER_ERROR;
+
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -17,7 +19,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public Result<Void> handleException(Exception e) {
-        log.error("服务器内部错误", e);
-        return Result.fail("服务器内部错误");
+        log.error(SERVER_ERROR, e);
+        return Result.fail(SERVER_ERROR);
     }
 }

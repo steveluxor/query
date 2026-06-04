@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import steveluxor.ragknowledgesystem.common.Constants;
 import steveluxor.ragknowledgesystem.common.Result;
+import steveluxor.ragknowledgesystem.exception.BizException;
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.mapper.DocumentMapper;
 import steveluxor.ragknowledgesystem.service.DocumentService;
@@ -24,7 +25,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
-import static steveluxor.ragknowledgesystem.common.Constants.DOC_STATUS_UPLOADED;
+import static steveluxor.ragknowledgesystem.common.Constants.*;
 
 @Service
 @Slf4j
@@ -59,7 +60,7 @@ public class DocumentServiceImpl implements DocumentService {
     @Override
     public Result uploadDocument(MultipartFile file, Long userId, Integer permission) {
         if (file.isEmpty()) {
-            return Result.fail("文件不能为空");
+            throw new BizException(FILE_NOT_EMPTY);
         }
 
         File tempFile = null;
@@ -134,8 +135,8 @@ public class DocumentServiceImpl implements DocumentService {
             log.info("文档上传成功: documentId={}, object={}", docId, objectName);
             return Result.ok(saved);
         } catch (Exception e) {
-            log.error("文档上传失败", e);
-            return Result.fail("文档上传失败: " + e.getMessage());
+            log.error(DOC_UPLOAD_FAILED, e);
+            throw new BizException(DOC_UPLOAD_FAILED + ": " + e.getMessage());
         }
     }
 
@@ -144,15 +145,15 @@ public class DocumentServiceImpl implements DocumentService {
     public Result getDocumentUrl(Long documentId) {
         Document document = documentMapper.selectById(documentId);
         if (document == null) {
-            return Result.fail("文件不存在");
+            throw new BizException(FILE_NOT_EXIST);
         }
 
         try {
             String url = fileService.getFileUrl(document.getFilePath());
             return Result.ok(url);
         } catch (Exception e) {
-            log.error("获取文档URL失败", e);
-            return Result.fail("获取文档URL失败");
+            log.error(DOC_GET_URL_FAILED, e);
+            throw new BizException(DOC_GET_URL_FAILED);
         }
     }
 
@@ -163,14 +164,20 @@ public class DocumentServiceImpl implements DocumentService {
         return Result.ok(list);
     }
 
+    /**
+     *
+     * @param documentId
+     * @param userId
+     * @return
+     */
     @Override
     public Result deleteDocument(Long documentId, Long userId) {
         Document document = documentMapper.selectById(documentId);
         if (document == null) {
-            return Result.fail("文件不存在");
+            throw new BizException(FILE_NOT_EXIST);
         }
         if (!document.getUserId().equals(userId)) {
-            return Result.fail("无权删除他人文件");
+            throw new BizException(FILE_NO_PERMISSION);
         }
 
         try {
@@ -193,8 +200,8 @@ public class DocumentServiceImpl implements DocumentService {
             log.info("文档删除成功: documentId={}", documentId);
             return Result.ok();
         } catch (Exception e) {
-            log.error("文档删除失败", e);
-            return Result.fail("文档删除失败");
+            log.error(DOC_DELETE_FAILED, e);
+            throw new BizException(DOC_DELETE_FAILED);
         }
     }
 }

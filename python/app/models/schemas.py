@@ -26,6 +26,7 @@ class QuestionRequest(BaseModel):
     document_ids: list[int] | None = None
     top_k: int = 5
     history: list[HistoryItem] | None = None
+    strategy: str | None = None  # relevance / diversity / None(自动判断)
 
 
 class Source(BaseModel):

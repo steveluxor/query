@@ -50,4 +50,12 @@
         update document set status = #{status} where id = #{id}
     </update>
 
+    <delete id="deleteByUserId">
+        delete from document where user_id = #{userId}
+    </delete>
+
+    <select id="selectOwnByUserId" resultType="steveluxor.ragknowledgesystem.entity.Document">
+        select * from document where user_id = #{userId} order by create_time desc
+    </select>
+
 </mapper>

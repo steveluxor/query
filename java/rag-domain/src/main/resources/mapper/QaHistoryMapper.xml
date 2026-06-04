@@ -35,9 +35,11 @@
     </delete>
 
     <select id="selectBySessionId" resultType="steveluxor.ragknowledgesystem.entity.QaHistory">
-        select * from qa_history
-        where session_id = #{sessionId} and user_id = #{userId}
-        order by create_time asc
+        select *
+        from qa_history
+        where session_id = #{sessionId}
+          and user_id = #{userId}
+        order by create_time
     </select>
 
     <delete id="deleteBySessionId">
@@ -51,6 +53,10 @@
             #{id}
         </foreach>
         and user_id = #{userId}
+    </delete>
+
+    <delete id="deleteByUserId">
+        delete from qa_history where user_id = #{userId}
     </delete>
 
 </mapper>

@@ -1,9 +1,11 @@
 package steveluxor.ragknowledgesystem.entity;
 
+import io.netty.util.Constant;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
+import steveluxor.ragknowledgesystem.common.Constants;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -20,6 +22,6 @@ public class User extends BaseEntity {
 
     public User(String phone) {
         this.phone = phone;
-        this.role = "USER";
+        this.role = Constants.ROLE_USER;
     }
 }

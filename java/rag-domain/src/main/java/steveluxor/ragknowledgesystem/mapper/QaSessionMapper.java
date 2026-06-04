@@ -18,4 +18,6 @@ public interface QaSessionMapper {
     void updateTitle(@Param("id") Long id, @Param("title") String title);
 
     void deleteById(Long id);
+
+    void deleteByUserId(Long userId);
 }

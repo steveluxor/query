@@ -10,4 +10,5 @@ import lombok.NoArgsConstructor;
 public class AskRequest {
     private String question;
     private Long sessionId;
+    private String strategy;
 }

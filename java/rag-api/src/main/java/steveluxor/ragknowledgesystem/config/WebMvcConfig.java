@@ -11,9 +11,11 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
 
     private final LoginInterceptor loginInterceptor;
+
     @Autowired
     public WebMvcConfig(LoginInterceptor loginInterceptor) {
-        this.loginInterceptor = loginInterceptor;}
+        this.loginInterceptor = loginInterceptor;
+    }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {

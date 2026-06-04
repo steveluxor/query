@@ -104,11 +104,18 @@ const Api = (() => {
             });
         },
 
+        // 删除用户
+        deleteUser(userId) {
+            return request(`/user/delete?userId=${userId}`, {
+                method: 'DELETE',
+            });
+        },
+
         // 问答模块
-        ask(question, sessionId) {
+        ask(question, sessionId, strategy) {
             return request('/qa/ask', {
                 method: 'POST',
-                body: JSON.stringify({ question, sessionId }),
+                body: JSON.stringify({ question, sessionId, strategy }),
             });
         },
 

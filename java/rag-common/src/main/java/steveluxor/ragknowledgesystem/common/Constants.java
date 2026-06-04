@@ -12,10 +12,38 @@ public class Constants {
 
     public static final String CODE_PREFIX = "CODE:";//验证码前缀
 
-    public static final String USER_NOT_LOGIN="未登录，请先登录";
-    public static final String JWT_EXPIRED="登录令牌无效或已过期";
+    // ====== 提示信息 ======
 
+    // 认证相关
+    public static final String USER_NOT_LOGIN = "未登录，请先登录";
+    public static final String JWT_EXPIRED = "登录令牌无效或已过期";
+    public static final String PHONE_FORMAT_ERROR = "手机号格式错误";
+    public static final String CODE_SEND_SUCCESS = "验证码发送成功";
+    public static final String CODE_ERROR = "验证码错误";
 
+    // 用户相关
+    public static final String USER_NOT_EXIST = "用户不存在";
+    public static final String USER_UPDATE_SUCCESS = "更新成功";
+    public static final String USER_DELETE_SUCCESS = "删除成功";
+
+    // 文档相关
+    public static final String FILE_NOT_EMPTY = "文件不能为空";
+    public static final String FILE_NOT_EXIST = "文件不存在";
+    public static final String FILE_NO_PERMISSION = "无权删除他人文件";
+    public static final String DOC_UPLOAD_FAILED = "文档上传失败";
+    public static final String DOC_DELETE_FAILED = "文档删除失败";
+    public static final String DOC_GET_URL_FAILED = "获取文档URL失败";
+
+    // 问答相关
+    public static final String AI_SERVICE_ERROR_PREFIX = "AI 服务返回错误: ";
+    public static final String AI_SERVICE_NOT_STARTED = "AI 服务未启动，请先启动 Python 服务";
+    public static final String QA_PROCESS_FAILED_PREFIX = "问答处理失败: ";
+    public static final String QA_RECORD_NOT_EXIST = "记录不存在";
+    public static final String QA_SELECT_RECORD_FIRST = "请选择要删除的记录";
+    public static final String QA_SESSION_NOT_EXIST = "会话不存在";
+
+    // 通用
+    public static final String SERVER_ERROR = "服务器内部错误";
 
     private Constants() {
     }

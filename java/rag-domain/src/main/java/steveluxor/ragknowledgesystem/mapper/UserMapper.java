@@ -15,4 +15,10 @@ public interface UserMapper {
 
     // 根据手机号更新用户信息
     void updateByPhone(User user);
+
+    // 根据ID查询用户
+    User selectById(Long id);
+
+    // 根据ID删除用户
+    void deleteById(Long id);
 }

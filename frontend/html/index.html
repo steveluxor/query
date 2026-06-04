@@ -138,8 +138,17 @@
                                 <div class="qa-empty">请选择或新建一个对话</div>
                             </div>
                             <div class="qa-input-area">
-                                <input type="text" id="qaInput" placeholder="请输入您的问题..." maxlength="500">
-                                <button id="qaSendBtn" class="btn btn-primary">发送</button>
+                                <div class="qa-toolbar">
+                                    <div class="qa-strategy-group" id="qaStrategyGroup">
+                                        <button class="qa-strategy-btn active" data-value="0">默认</button>
+                                        <button class="qa-strategy-btn" data-value="1">对比</button>
+                                        <button class="qa-strategy-btn" data-value="2">专一</button>
+                                    </div>
+                                </div>
+                                <div class="qa-input-row">
+                                    <input type="text" id="qaInput" placeholder="请输入您的问题..." maxlength="500">
+                                    <button id="qaSendBtn" class="btn btn-primary">发送</button>
+                                </div>
                             </div>
                         </section>
                     </div>
@@ -178,6 +187,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
+                    <button id="deleteAccountBtn" class="btn btn-danger">注销账户</button>
                     <button id="saveProfileBtn" class="btn btn-primary">保存修改</button>
                 </div>
             </div>
