@@ -1,7 +1,12 @@
-import chromadb
+import logging
+import threading
+
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -17,11 +22,13 @@ class VectorStore:
             embedding_function=embedding,
             persist_directory=settings.vector_store_path,
         )
+        self._rebuild_lock = threading.Lock()
+        self._delete_count = 0
+        self._compact_threshold = 50
 
-    def add_texts(self, texts: list[str], metadatas: list[dict]) -> list[str]:
-        """将文本块及其元数据向量化后存入，返回 ID 列表"""
-        ids = self._db.add_texts(texts=texts, metadatas=metadatas)
-        return ids
+    def add_texts(self, texts: list[str], metadatas: list[dict]):
+        """将文本块及其元数据向量化后存入"""
+        self._db.add_texts(texts=texts, metadatas=metadatas)
 
     def similarity_search(self, query: str, k: int = 5, filter: dict | None = None):
         """语义检索最相关的 K 个文本块"""
@@ -32,3 +39,37 @@ class VectorStore:
         results = self._db.get(where={"document_id": document_id})
         if results and results.get("ids"):
             self._db.delete(ids=results["ids"])
+            self._delete_count += 1
+            if self._delete_count >= self._compact_threshold:
+                self.compact()
+
+    def compact(self):
+        """重建索引，释放 tombstone 占用的磁盘空间"""
+        with self._rebuild_lock:
+            all_data = self._db.get(include=["embeddings", "documents", "metadatas"])
+            if not all_data.get("ids"):
+                self._db.reset_collection()
+                self._delete_count = 0
+                return
+
+            self._db.reset_collection()
+
+            self._db._collection.add(
+                ids=all_data["ids"],
+                embeddings=all_data["embeddings"],
+                documents=all_data["documents"],
+                metadatas=all_data["metadatas"],
+            )
+            self._delete_count = 0
+            logger.info("向量库压缩完成，保留 %d 条记录", len(all_data["ids"]))
+
+    def get_all_chunks(self, filter: dict | None = None) -> list[tuple[Document, float]]:
+        """获取全部 chunk（不走相似度搜索，用于聚合查询）"""
+        results = self._db.get(where=filter) if filter else self._db.get()
+        docs = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        logger.info("get_all_chunks: 共 %d 个 chunk", len(docs))
+        return [
+            (Document(page_content=doc, metadata=meta), 0.0)
+            for doc, meta in zip(docs, metadatas)
+        ]

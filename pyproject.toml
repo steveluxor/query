@@ -20,6 +20,7 @@ dependencies = [
     "pydantic-settings>=2.7",
     "aiohttp>=3.11",
     # LangChain integrations
+    "openpyxl>=3.1",
     "langchain-chroma>=0.2",
     "langchain-openai>=0.3",
 ]

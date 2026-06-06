@@ -21,6 +21,8 @@ async def ingest_document(
 ):
     """接收文档，执行解析、切片、向量化并存入向量库"""
     try:
+        # 清理该文档的旧 chunk，防止残留数据干扰
+        vector_store.delete_by_document_id(request.document_id)
         chunks = processor.process(
             file_path=request.file_path,
             document_id=request.document_id,
@@ -34,12 +36,11 @@ async def ingest_document(
     texts = [c["text"] for c in chunks]
     metadatas = [c["metadata"] for c in chunks]
 
-    ids = vector_store.add_texts(texts, metadatas)
+    vector_store.add_texts(texts, metadatas)
 
     return IngestResponse(
         document_id=request.document_id,
         status="success",
-        chunks=len(ids),
     )
 
 

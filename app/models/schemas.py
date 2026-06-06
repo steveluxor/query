@@ -11,7 +11,6 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     document_id: int
     status: str
-    chunks: int
 
 
 class HistoryItem(BaseModel):
