@@ -1,8 +1,11 @@
 package steveluxor.ragknowledgesystem.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
@@ -11,6 +14,7 @@ import steveluxor.ragknowledgesystem.dto.AskRequest;
 import steveluxor.ragknowledgesystem.exception.BizException;
 
 import static steveluxor.ragknowledgesystem.common.Constants.*;
+
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.entity.QaHistory;
 import steveluxor.ragknowledgesystem.entity.QaSession;
@@ -24,10 +28,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -42,6 +49,7 @@ public class QaServiceImpl implements QaService {
     private final QaHistoryMapper qaHistoryMapper;
     private final QaSessionMapper qaSessionMapper;
     private final DocumentMapper documentMapper;
+    private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
@@ -50,12 +58,16 @@ public class QaServiceImpl implements QaService {
             QaHistoryMapper qaHistoryMapper,
             QaSessionMapper qaSessionMapper,
             DocumentMapper documentMapper,
+            StringRedisTemplate redisTemplate,
             @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
         this.qaHistoryMapper = qaHistoryMapper;
         this.qaSessionMapper = qaSessionMapper;
         this.documentMapper = documentMapper;
+        this.redisTemplate = redisTemplate;
         this.pythonBaseUrl = pythonBaseUrl;
         this.objectMapper = new ObjectMapper();
+        this.objectMapper.registerModule(new JavaTimeModule());
+        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .version(HttpClient.Version.HTTP_1_1)
@@ -66,6 +78,21 @@ public class QaServiceImpl implements QaService {
     public Result ask(AskRequest request) {
         Long userId = CurrentUser.get();
         try {
+            // 1. 生成缓存 Key
+            // 去除标点和空格后再计算 MD5
+            String normalized = request.getQuestion()
+                    .replaceAll("[？?！!。，,\\s]", "");  // 去掉标点和空格
+            String cacheKey = QA_CACHE_PREFIX + userId + ":" + md5(normalized);
+
+            // 2. 尝试从 Redis 获取缓存
+            String cachedJson = redisTemplate.opsForValue().get(cacheKey);
+            if (cachedJson != null) {
+                log.info("问答缓存命中: userId={}, question={}", userId, request.getQuestion());
+                QaHistory cachedHistory = objectMapper.readValue(cachedJson, QaHistory.class);
+                return Result.ok(cachedHistory);
+            }
+
+            // 3. 缓存未命中，调用 Python AI 服务
             List<Document> accessibleDocs = documentMapper.selectByUserId(userId);
             List<Integer> accessibleDocIds = accessibleDocs.stream()
                     .map(doc -> doc.getId().intValue())
@@ -120,7 +147,7 @@ public class QaServiceImpl implements QaService {
             Object sources = pythonResp.getOrDefault("sources", List.of());
             String sourcesJson = objectMapper.writeValueAsString(sources);
 
-            // 保存问答历史
+            // 4. 保存问答历史
             QaHistory history = QaHistory.builder()
                     .userId(userId)
                     .sessionId(request.getSessionId())
@@ -130,6 +157,11 @@ public class QaServiceImpl implements QaService {
                     .createUser(userId)
                     .build();
             qaHistoryMapper.insert(history);
+
+            // 5. 写入 Redis 缓存（TTL 30 分钟）
+            String historyJson = objectMapper.writeValueAsString(history);
+            redisTemplate.opsForValue().set(cacheKey, historyJson, QA_CACHE_TTL, TimeUnit.MINUTES);
+            log.info("问答缓存写入: userId={}, key={}", userId, cacheKey);
 
             // 首次提问时自动设置会话标题
             if (request.getSessionId() != null) {
@@ -148,6 +180,23 @@ public class QaServiceImpl implements QaService {
         } catch (Exception e) {
             log.error("问答失败", e);
             throw new BizException(QA_PROCESS_FAILED_PREFIX + e.getMessage());
+        }
+    }
+
+    /**
+     * MD5 摘要，用于生成缓存 Key
+     */
+    private String md5(String content) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(content.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
         }
     }
 

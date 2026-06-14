@@ -50,12 +50,30 @@
         update document set status = #{status} where id = #{id}
     </update>
 
+    <update id="updateDocument" parameterType="steveluxor.ragknowledgesystem.entity.Document">
+        update document
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="fileName != null">file_name = #{fileName},</if>
+            <if test="filePath != null">file_path = #{filePath},</if>
+            <if test="fileSize != null">file_size = #{fileSize},</if>
+            <if test="fileType != null">file_type = #{fileType},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="permission != null">permission = #{permission},</if>
+            update_time = NOW()
+        </trim>
+        where id = #{id}
+    </update>
+
     <delete id="deleteByUserId">
         delete from document where user_id = #{userId}
     </delete>
 
     <select id="selectOwnByUserId" resultType="steveluxor.ragknowledgesystem.entity.Document">
         select * from document where user_id = #{userId} order by create_time desc
+    </select>
+
+    <select id="selectByFileName" resultType="steveluxor.ragknowledgesystem.entity.Document">
+        select * from document where file_name = #{fileName} order by create_time desc
     </select>
 
 </mapper>

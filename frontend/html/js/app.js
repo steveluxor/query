@@ -14,6 +14,7 @@
         countdownTimer: null,
         currentSessionId: null,
         sessions: [],
+        reuploadDocId: null,
     };
 
     // ============================================
@@ -42,6 +43,7 @@
         fileInput: $('#fileInput'),
         selectFileBtn: $('#selectFileBtn'),
         uploadProgress: $('#uploadProgress'),
+        reuploadFileInput: $('#reuploadFileInput'),
         progressFill: $('.progress-fill'),
         progressText: $('.progress-text'),
         permissionRadios: document.querySelectorAll('input[name="permission"]'),
@@ -169,8 +171,10 @@
                     <td class="file-size">${formatTime(doc.createTime)}</td>
                     <td>
                         <div class="action-btns">
-                            <button class="btn btn-secondary btn-sm" data-action="url" data-id="${doc.id}">获取链接</button>
-                            ${isOwner ? `<button class="btn btn-danger btn-sm" data-action="delete" data-id="${doc.id}">删除</button>` : ''}
+                            ${doc.id ? `<button class="btn btn-secondary btn-sm" data-action="url" data-id="${doc.id}">获取链接</button>` : ''}
+                            ${isOwner && doc.id ? `<button class="btn btn-secondary btn-sm" data-action="reupload" data-id="${doc.id}">重新上传</button>` : ''}
+                            ${isOwner && doc.status === 'FAILED' && doc.id ? `<button class="btn btn-warning btn-sm" data-action="reingest" data-id="${doc.id}">重新向量化</button>` : ''}
+                            ${isOwner && doc.id ? `<button class="btn btn-danger btn-sm" data-action="delete" data-id="${doc.id}">删除</button>` : ''}
                         </div>
                     </td>
                 </tr>
@@ -480,7 +484,7 @@
 
         container.innerHTML = state.sessions.map(s => {
             const title = s.title || '新对话';
-            const isActive = s.id === state.currentSessionId;
+            const isActive = Number(s.id) === state.currentSessionId;
             return `
                 <div class="qa-session-item ${isActive ? 'active' : ''}" data-session-id="${s.id}">
                     <span class="session-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
@@ -524,7 +528,7 @@
 
             // 如果当前 session 不在列表中（可能被删了），清除选中
             if (state.currentSessionId) {
-                const exists = state.sessions.some(s => s.id === state.currentSessionId);
+                const exists = state.sessions.some(s => Number(s.id) === state.currentSessionId);
                 if (!exists) {
                     state.currentSessionId = null;
                 }
@@ -532,7 +536,7 @@
 
             // 没有选中时自动选中第一个
             if (!state.currentSessionId && state.sessions.length > 0) {
-                state.currentSessionId = state.sessions[0].id;
+                state.currentSessionId = Number(state.sessions[0].id);
             }
 
             renderSessionList();
@@ -566,17 +570,19 @@
     }
 
     async function handleSwitchSession(sessionId) {
-        if (sessionId === state.currentSessionId) return;
+        sessionId = Number(sessionId);
+        if (!sessionId || sessionId === state.currentSessionId) return;
         state.currentSessionId = sessionId;
         renderSessionList();
         updateQaHeader();
         loadQaHistory();
     }
 
-    async function handleDeleteSession(e) {
-        e.stopPropagation();
-        const sessionId = parseInt(e.currentTarget.dataset.sessionId);
-        const session = state.sessions.find(s => s.id === sessionId);
+    async function handleDeleteSession(btn) {
+        const rawId = btn.dataset.sessionId;
+        const sessionId = Number(rawId);
+        if (!sessionId || isNaN(sessionId)) return;
+        const session = state.sessions.find(s => Number(s.id) === sessionId);
         const title = session?.title || '新对话';
         if (!confirm(`确定要删除对话"${title}"及其所有消息吗？`)) return;
 
@@ -726,6 +732,87 @@
     // ============================================
     // 文档上传
     // ============================================
+    function showDuplicateDialog(fileName) {
+        return new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.className = 'duplicate-modal';
+            modal.innerHTML = `
+                <div class="duplicate-dialog">
+                    <div class="duplicate-header">文件名已存在</div>
+                    <div class="duplicate-body">
+                        <p>文件 "<strong>${escapeHtml(fileName)}</strong>" 已存在，您要如何处理？</p>
+                    </div>
+                    <div class="duplicate-actions">
+                        <button class="btn btn-primary" data-action="overwrite">覆盖旧版本</button>
+                        <button class="btn btn-secondary" data-action="rename">改名上传</button>
+                        <button class="btn btn-cancel" data-action="cancel">取消</button>
+                    </div>
+                </div>
+            `;
+
+            modal.addEventListener('click', (e) => {
+                const action = e.target.dataset.action;
+                if (action) {
+                    modal.remove();
+                    resolve(action);
+                }
+            });
+
+            document.body.appendChild(modal);
+        });
+    }
+
+    function promptNewName(originalFile) {
+        return new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.className = 'duplicate-modal';
+            const nameParts = originalFile.name.split('.');
+            const ext = nameParts.length > 1 ? '.' + nameParts.pop() : '';
+            const baseName = nameParts.join('.');
+
+            modal.innerHTML = `
+                <div class="duplicate-dialog">
+                    <div class="duplicate-header">输入新文件名</div>
+                    <div class="duplicate-body">
+                        <input type="text" class="rename-input" value="${escapeHtml(baseName)}(新版本)${ext}" />
+                    </div>
+                    <div class="duplicate-actions">
+                        <button class="btn btn-primary" data-action="confirm">确认</button>
+                        <button class="btn btn-cancel" data-action="cancel">取消</button>
+                    </div>
+                </div>
+            `;
+
+            const input = modal.querySelector('.rename-input');
+            input.select();
+
+            modal.addEventListener('click', (e) => {
+                const action = e.target.dataset.action;
+                if (action === 'confirm') {
+                    const newName = input.value.trim();
+                    if (!newName) {
+                        showToast('请输入文件名', 'error');
+                        return;
+                    }
+                    modal.remove();
+                    const newFile = new File([originalFile], newName, { type: originalFile.type });
+                    resolve(newFile);
+                } else if (action === 'cancel') {
+                    modal.remove();
+                    resolve(null);
+                }
+            });
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    modal.querySelector('[data-action="confirm"]').click();
+                }
+            });
+
+            document.body.appendChild(modal);
+        });
+    }
+
     async function uploadFile(file) {
         if (!state.userId) {
             showToast('请先登录', 'error');
@@ -736,6 +823,32 @@
         els.permissionRadios.forEach(r => {
             if (r.checked) permission = parseInt(r.value);
         });
+
+        try {
+            const checkResult = await Api.checkDuplicate(file.name, state.userId);
+
+            if (checkResult.exists) {
+                if (checkResult.isOwner) {
+                    const action = await showDuplicateDialog(file.name);
+
+                    if (action === 'cancel') {
+                        return;
+                    } else if (action === 'rename') {
+                        file = await promptNewName(file);
+                        if (!file) return;
+                    } else if (action === 'overwrite') {
+                        return await overwriteUpload(file, checkResult.existingId, permission);
+                    }
+                } else {
+                    showToast('该文件名已被其他用户使用', 'info');
+                    file = await promptNewName(file);
+                    if (!file) return;
+                }
+            }
+        } catch (err) {
+            showToast(`检查文件名失败: ${err.message}`, 'error');
+            return;
+        }
 
         els.uploadProgress.classList.remove('hidden');
         els.progressFill.style.width = '30%';
@@ -760,6 +873,33 @@
         }
     }
 
+    async function overwriteUpload(file, existingId, permission) {
+        els.uploadProgress.classList.remove('hidden');
+        els.progressFill.style.width = '30%';
+        els.progressText.textContent = '覆盖上传中...';
+
+        try {
+            const doc = await Api.overwriteDocument(existingId, file, state.userId, permission);
+            els.progressFill.style.width = '100%';
+            els.progressText.textContent = '上传完成';
+
+            const index = state.documents.findIndex(d => String(d.id) === String(existingId));
+            if (index !== -1) {
+                state.documents[index] = doc;
+            }
+            renderDocumentList();
+            showToast(`"${file.name}" 覆盖上传成功`, 'success');
+        } catch (err) {
+            els.progressFill.style.width = '0%';
+            showToast(`覆盖上传失败: ${err.message}`, 'error');
+        } finally {
+            setTimeout(() => {
+                els.uploadProgress.classList.add('hidden');
+                els.progressFill.style.width = '0%';
+            }, 2000);
+        }
+    }
+
     function handleFileSelect() {
         els.fileInput.click();
     }
@@ -769,6 +909,46 @@
         if (files.length === 0) return;
         uploadFile(files[0]);
         els.fileInput.value = '';
+    }
+
+    async function handleReuploadInputChange() {
+        const files = els.reuploadFileInput.files;
+        if (files.length === 0 || !state.reuploadDocId) return;
+
+        const file = files[0];
+        const docId = state.reuploadDocId;
+        state.reuploadDocId = null;
+        els.reuploadFileInput.value = '';
+
+        let permission = 0;
+        els.permissionRadios.forEach(r => {
+            if (r.checked) permission = parseInt(r.value);
+        });
+
+        els.uploadProgress.classList.remove('hidden');
+        els.progressFill.style.width = '30%';
+        els.progressText.textContent = '重新上传中...';
+
+        try {
+            const doc = await Api.overwriteDocument(docId, file, state.userId, permission);
+            els.progressFill.style.width = '100%';
+            els.progressText.textContent = '上传完成';
+
+            const index = state.documents.findIndex(d => String(d.id) === String(docId));
+            if (index !== -1) {
+                state.documents[index] = doc;
+            }
+            renderDocumentList();
+            showToast(`"${file.name}" 重新上传成功`, 'success');
+        } catch (err) {
+            els.progressFill.style.width = '0%';
+            showToast(`重新上传失败: ${err.message}`, 'error');
+        } finally {
+            setTimeout(() => {
+                els.uploadProgress.classList.add('hidden');
+                els.progressFill.style.width = '0%';
+            }, 2000);
+        }
     }
 
     // ============================================
@@ -803,6 +983,11 @@
         const action = target.dataset.action;
         const id = target.dataset.id;
 
+        if (!id || id === 'undefined' || id === 'NaN') {
+            showToast('文档ID无效', 'error');
+            return;
+        }
+
         if (action === 'url') {
             try {
                 target.disabled = true;
@@ -833,6 +1018,23 @@
                 target.disabled = false;
                 target.textContent = '删除';
             }
+        } else if (action === 'reingest') {
+            try {
+                target.disabled = true;
+                target.textContent = '处理中...';
+                await Api.reIngestDocument(id, state.userId);
+                const doc = state.documents.find(d => String(d.id) === String(id));
+                if (doc) doc.status = 'COMPLETED';
+                renderDocumentList();
+                showToast('重新向量化成功', 'success');
+            } catch (err) {
+                showToast(`重新向量化失败: ${err.message}`, 'error');
+                target.disabled = false;
+                target.textContent = '重新向量化';
+            }
+        } else if (action === 'reupload') {
+            state.reuploadDocId = id;
+            els.reuploadFileInput.click();
         }
     }
 
@@ -877,19 +1079,19 @@
         els.sessionList.addEventListener('click', (e) => {
             const delBtn = e.target.closest('.session-delete');
             if (delBtn) {
-                handleDeleteSession(e);
+                handleDeleteSession(delBtn);
                 return;
             }
             const item = e.target.closest('.qa-session-item');
             if (item) {
-                handleSwitchSession(parseInt(item.dataset.sessionId));
+                handleSwitchSession(item.dataset.sessionId);
             }
         });
 
         // 删除当前会话
         els.deleteSessionBtn.addEventListener('click', () => {
             if (!state.currentSessionId) return;
-            const session = state.sessions.find(s => s.id === state.currentSessionId);
+            const session = state.sessions.find(s => Number(s.id) === state.currentSessionId);
             const title = session?.title || '新对话';
             if (!confirm(`确定要删除对话"${title}"及其所有消息吗？`)) return;
             (async () => {
@@ -925,6 +1127,7 @@
             handleFileSelect();
         });
         els.fileInput.addEventListener('change', handleFileInputChange);
+        els.reuploadFileInput.addEventListener('change', handleReuploadInputChange);
         setupDragAndDrop();
 
         // 文档操作（事件委托）

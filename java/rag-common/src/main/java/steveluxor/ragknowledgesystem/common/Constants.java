@@ -45,6 +45,26 @@ public class Constants {
     // 通用
     public static final String SERVER_ERROR = "服务器内部错误";
 
+    // Redis 问答缓存
+    public static final String QA_CACHE_PREFIX = "qa:cache:";
+    public static final Long QA_CACHE_TTL = 30L; // 分钟
+
+    // Redis 接口限流
+    public static final String RATE_LIMIT_PREFIX = "rate:";
+    public static final Long RATE_LIMIT_MAX = 30L; // 每分钟最大请求数
+    public static final Long RATE_LIMIT_WINDOW = 60L; // 限流窗口（秒）
+    public static final String RATE_LIMIT_EXCEEDED = "请求过于频繁，请稍后再试";
+
+    // Redis 文件锁（防止同名文件同时上传）
+    public static final String FILE_LOCK_PREFIX = "lock:ingest:";
+    public static final Long FILE_LOCK_TTL = 120L; // 秒（与向量化超时一致）
+    public static final String FILE_NAME_EXISTS = "文件名已存在，请修改文件名";
+
+    // Redis Stream（异步向量化）
+    public static final String STREAM_INGEST_KEY = "stream:ingest";
+    public static final String STREAM_INGEST_GROUP = "ingest-group";
+    public static final String STREAM_INGEST_CONSUMER = "worker-1";
+
     private Constants() {
     }
 }

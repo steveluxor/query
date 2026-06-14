@@ -211,6 +211,15 @@ input::placeholder {
     background: var(--danger-hover);
 }
 
+.btn-warning {
+    background: var(--warning);
+    color: #fff;
+}
+
+.btn-warning:hover:not(:disabled) {
+    background: #d97706;
+}
+
 .btn-text {
     background: transparent;
     color: var(--gray-500);
@@ -1213,4 +1222,81 @@ input::placeholder {
     .action-btns {
         flex-direction: column;
     }
+}
+
+/* ============================================
+   重名对话框
+   ============================================ */
+
+.duplicate-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.duplicate-dialog {
+    background: #fff;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    padding: 24px;
+    width: 100%;
+    max-width: 400px;
+}
+
+.duplicate-header {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--gray-800);
+    margin-bottom: 16px;
+}
+
+.duplicate-body {
+    margin-bottom: 24px;
+    color: var(--gray-600);
+    line-height: 1.6;
+}
+
+.duplicate-body p {
+    margin: 0;
+}
+
+.duplicate-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.duplicate-actions .btn {
+    min-width: 80px;
+}
+
+.btn-cancel {
+    background: var(--gray-100);
+    color: var(--gray-600);
+    border: 1px solid var(--gray-200);
+}
+
+.btn-cancel:hover {
+    background: var(--gray-200);
+}
+
+.rename-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--gray-300);
+    border-radius: var(--radius);
+    font-size: 14px;
+    outline: none;
+    transition: border-color var(--transition);
+}
+
+.rename-input:focus {
+    border-color: var(--primary);
 }

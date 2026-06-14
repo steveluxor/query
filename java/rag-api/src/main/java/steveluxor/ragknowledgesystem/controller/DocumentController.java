@@ -44,4 +44,35 @@ public class DocumentController {
         log.info("删除文档请求: documentId={}, userId={}", documentId, userId);
         return documentService.deleteDocument(documentId, userId);
     }
+
+    @PostMapping("/{id}/re-ingest")
+    public Result reIngestDocument(@PathVariable("id") Long documentId,
+                                   @RequestParam("userId") Long userId) {
+        log.info("重新向量化请求: documentId={}, userId={}", documentId, userId);
+        return documentService.reIngestDocument(documentId, userId);
+    }
+
+    @GetMapping("/check-duplicate")
+    public Result checkDuplicate(@RequestParam("fileName") String fileName,
+                                 @RequestParam("userId") Long userId) {
+        log.info("检查文件名重复: fileName={}, userId={}", fileName, userId);
+        return documentService.checkDuplicate(fileName, userId);
+    }
+
+    @PostMapping("/{id}/overwrite")
+    public Result overwriteDocument(@PathVariable("id") Long documentId,
+                                    @RequestParam("file") MultipartFile file,
+                                    @RequestParam("userId") Long userId,
+                                    @RequestParam Integer permission) {
+        log.info("覆盖上传文档请求: documentId={}, fileName={}, userId={}", documentId, file.getOriginalFilename(), userId);
+        return documentService.overwriteDocument(documentId, file, userId, permission);
+    }
+
+    @PutMapping("/{id}/status")
+    public Result updateStatus(@PathVariable("id") Long documentId,
+                               @RequestBody java.util.Map<String, String> body) {
+        log.info("更新文档状态: documentId={}, status={}", documentId, body.get("status"));
+        documentService.updateDocumentStatus(documentId, body.get("status"));
+        return Result.ok();
+    }
 }

@@ -96,6 +96,27 @@ const Api = (() => {
             });
         },
 
+        reIngestDocument(documentId, userId) {
+            return request(`/document/${documentId}/re-ingest?userId=${userId}`, {
+                method: 'POST',
+            });
+        },
+
+        checkDuplicate(fileName, userId) {
+            return request(`/document/check-duplicate?fileName=${encodeURIComponent(fileName)}&userId=${userId}`);
+        },
+
+        overwriteDocument(documentId, file, userId, permission) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('userId', userId);
+            formData.append('permission', permission);
+            return request(`/document/${documentId}/overwrite`, {
+                method: 'POST',
+                body: formData,
+            });
+        },
+
         // 用户信息更新
         updateUser(data) {
             return request('/user/update', {

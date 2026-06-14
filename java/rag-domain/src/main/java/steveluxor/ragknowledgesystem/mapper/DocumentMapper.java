@@ -26,6 +26,12 @@ public interface DocumentMapper {
     // 更新文档状态
     void updateStatus(@Param("id") Long id, @Param("status") String status);
 
+    // 更新文档信息
+    void updateDocument(Document document);
+
     // 根据用户ID批量删除文档
     void deleteByUserId(Long userId);
+
+    // 根据文件名查询文档列表
+    List<Document> selectByFileName(@Param("fileName") String fileName);
 }
