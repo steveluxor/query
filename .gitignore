@@ -12,12 +12,12 @@ chroma_db/
 .env
 
 # Java
-java/**/target/
-java/*.iml
+java-backend/**/target/
+java-backend/*.iml
+java-backend/.mvn/
 
 # Logs
 *.log
 
 # IDE
 .idea/
-"=3.1"
