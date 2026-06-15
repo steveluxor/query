@@ -1,0 +1,14 @@
+spring:
+  data:
+    redis:
+      host: redis
+  rabbitmq:
+    host: rabbitmq
+  datasource:
+    url: jdbc:mysql://mysql:3306/rag_knowledge?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+
+minio:
+  endpoint: http://minio:9000
+
+ai-service:
+  python-base-url: http://python-ai:8000

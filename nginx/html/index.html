@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG 知识系统</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 登录页面 -->
+        <div id="loginPage" class="page active">
+            <div class="login-card">
+                <div class="login-header">
+                    <div class="logo">RAG</div>
+                    <h1>知识管理系统</h1>
+                    <p class="subtitle">登录以管理您的文档知识库</p>
+                </div>
+                <div class="login-form">
+                    <div class="form-group">
+                        <label for="phoneInput">手机号</label>
+                        <input type="tel" id="phoneInput" placeholder="请输入手机号" maxlength="11">
+                    </div>
+                    <div class="form-group">
+                        <button id="sendCodeBtn" class="btn btn-secondary">发送验证码</button>
+                    </div>
+                    <div class="form-group">
+                        <label for="codeInput">验证码</label>
+                        <input type="text" id="codeInput" placeholder="请输入验证码" maxlength="6">
+                    </div>
+                    <div class="form-group">
+                        <button id="loginBtn" class="btn btn-primary">登 录</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 主页面 -->
+        <div id="mainPage" class="page">
+            <!-- 顶部导航 -->
+            <header class="header">
+                <div class="header-left">
+                    <div class="logo-small">RAG</div>
+                    <span class="header-title">知识管理系统</span>
+                </div>
+                <div class="header-right">
+                    <span id="userDisplay" class="user-info"></span>
+                    <div class="header-tabs">
+                        <button id="docTabBtn" class="btn btn-text active-tab">文档</button>
+                        <button id="qaTabBtn" class="btn btn-text">问答</button>
+                    </div>
+                    <button id="profileBtn" class="btn btn-text">个人信息</button>
+                    <button id="logoutBtn" class="btn btn-text">退出登录</button>
+                </div>
+            </header>
+
+            <main class="main-content">
+                <!-- 上传区域 -->
+                <section class="card upload-section">
+                    <h2 class="card-title">上传文档</h2>
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-icon">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                        </div>
+                        <p class="upload-text">拖拽文件到此处，或点击上传</p>
+                        <p class="upload-hint">支持 PDF、Word、TXT 等格式</p>
+                        <input type="file" id="fileInput" hidden multiple>
+                        <input type="file" id="reuploadFileInput" hidden>
+                        <button id="selectFileBtn" class="btn btn-primary">选择文件</button>
+                    </div>
+                    <div class="permission-selector">
+                        <span class="permission-label">文件权限：</span>
+                        <label class="radio-label">
+                            <input type="radio" name="permission" value="0" checked>
+                            <span>公开</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="permission" value="1">
+                            <span>私有</span>
+                        </label>
+                    </div>
+                    <div id="uploadProgress" class="upload-progress hidden">
+                        <div class="progress-bar">
+                            <div class="progress-fill"></div>
+                        </div>
+                        <span class="progress-text">上传中...</span>
+                    </div>
+                </section>
+
+                <!-- 文档列表 -->
+                <section class="card document-list-section">
+                    <h2 class="card-title">文档列表</h2>
+                    <div class="table-wrapper">
+                        <table class="doc-table">
+                            <thead>
+                                <tr>
+                                    <th>文件信息</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="docTableBody">
+                                <tr id="emptyRow">
+                                    <td colspan="2" class="empty-state">暂无文档，请上传</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- 问答视图 -->
+                <div id="qaView" style="display:none;">
+                    <div class="qa-layout">
+                        <aside class="qa-sidebar">
+                            <button id="newSessionBtn" class="btn btn-primary btn-block">+ 新建对话</button>
+                            <div class="qa-session-list" id="sessionList">
+                                <div class="qa-session-empty">暂无对话</div>
+                            </div>
+                        </aside>
+                        <section class="card qa-section">
+                            <div class="qa-header">
+                                <div class="qa-header-left">
+                                    <h2 class="card-title" id="currentSessionTitle" style="margin:0; border:none; padding:0;">智能问答</h2>
+                                    <span class="qa-subtitle" id="sessionSubtitle">请选择或新建一个对话</span>
+                                </div>
+                                <div class="qa-header-right">
+                                    <button id="deleteSessionBtn" class="btn btn-danger btn-sm hidden">删除当前对话</button>
+                                </div>
+                            </div>
+                            <div class="qa-messages" id="qaMessages">
+                                <div class="qa-empty">请选择或新建一个对话</div>
+                            </div>
+                            <div class="qa-input-area">
+                                <div class="qa-toolbar">
+                                    <div class="qa-strategy-group" id="qaStrategyGroup">
+                                        <button class="qa-strategy-btn active" data-value="0">默认</button>
+                                        <button class="qa-strategy-btn" data-value="1">对比</button>
+                                        <button class="qa-strategy-btn" data-value="2">专一</button>
+                                    </div>
+                                </div>
+                                <div class="qa-input-row">
+                                    <input type="text" id="qaInput" placeholder="请输入您的问题..." maxlength="500">
+                                    <button id="qaSendBtn" class="btn btn-primary">发送</button>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+
+            </main>
+        </div>
+
+        <!-- 个人信息弹窗 -->
+        <div id="profileModal" class="modal-overlay" style="display:none;">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h2>个人信息</h2>
+                    <button id="closeProfileBtn" class="btn btn-text">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="profilePhone">手机号</label>
+                            <input type="text" id="profilePhone" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label for="profileUsername">用户名</label>
+                            <input type="text" id="profileUsername" placeholder="设置用户名">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="profileEmail">邮箱</label>
+                            <input type="text" id="profileEmail" placeholder="设置邮箱">
+                        </div>
+                        <div class="form-group">
+                            <label for="profilePassword">密码</label>
+                            <input type="password" id="profilePassword" placeholder="留空则不修改">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="deleteAccountBtn" class="btn btn-danger">注销账户</button>
+                    <button id="saveProfileBtn" class="btn btn-primary">保存修改</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Toast 消息 -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

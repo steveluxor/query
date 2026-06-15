@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: rag-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 1234
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --requirepass sty01725
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rag-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: rag-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "ollama serve &
+       sleep 3 &&
+       ollama pull nomic-embed-text &&
+       wait"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  python-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-python-ai
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      RABBITMQ_HOST: rabbitmq
+      MINIO_ENDPOINT: http://minio:9000
+      JAVA_BASE_URL: http://java-backend:8085
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-chat}
+      LLM_API_KEY: ${LLM_API_KEY}
+      EMBEDDING_MODEL_NAME: nomic-embed-text
+      EMBEDDING_DEVICE: cpu
+      VECTOR_STORE_PATH: /app/chroma_db
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  stream-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-stream-consumer
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      RABBITMQ_HOST: rabbitmq
+      MINIO_ENDPOINT: http://minio:9000
+      JAVA_BASE_URL: http://java-backend:8085
+      PYTHON_BASE_URL: http://python-ai:8000
+      VECTOR_STORE_PATH: /app/chroma_db
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      python-ai:
+        condition: service_started
+    command: python -m app.stream_consumer
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  java-backend:
+    build:
+      context: ./java-backend
+      dockerfile: Dockerfile
+    container_name: rag-java-backend
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      python-ai:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: rag-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/conf/nginx-docker.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+    depends_on:
+      - java-backend
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:
+  ollama-data:
+
+networks:
+  rag-network:
+    driver: bridge
