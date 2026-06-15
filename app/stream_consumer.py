@@ -18,16 +18,20 @@ import os
 import time
 import requests
 import redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Redis 连接
+# Redis 连接（增加 socket_timeout 防止读取超时）
 redis_client = redis.Redis(
     host="localhost",
     port=6379,
     password="sty01725",
-    decode_responses=True
+    decode_responses=True,
+    socket_timeout=10,
+    socket_connect_timeout=5,
+    retry_on_timeout=True
 )
 
 # Stream 配置
@@ -156,6 +160,9 @@ def main():
                         redis_client.xack(STREAM_KEY, GROUP_NAME, message_id)
                         logger.info(f"消息已确认: id={message_id}")
 
+        except RedisTimeoutError:
+            # 超时是正常的（没有新消息时），不打印错误
+            continue
         except Exception as e:
             logger.error(f"消费者异常: {e}")
             time.sleep(1)

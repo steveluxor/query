@@ -165,28 +165,63 @@ class RAGEngine:
             pass
         return question
 
+    def _extract_column_from_question(self, question: str, chunks: list) -> str | None:
+        """从用户问题中提取明确指定的列名（如"使用结果列"→"结果"），只匹配数值列"""
+        if not chunks or not question:
+            return None
+        # 收集所有 chunk 中的 key 名，并统计每个 key 的数值比例
+        key_values: dict[str, list[float]] = {}
+        for doc, _ in chunks[:300]:
+            for line in doc.page_content.split("\n"):
+                if ":" in line:
+                    k, _, val = line.partition(":")
+                    k = k.strip()
+                    val = val.strip().replace(",", "")
+                    if k:
+                        try:
+                            key_values.setdefault(k, []).append(float(val))
+                        except ValueError:
+                            key_values.setdefault(k, [])
+        numeric_keys = {k for k, v in key_values.items() if v}
+        logger.info("chunk中的所有key: %s", sorted(key_values.keys()))
+        logger.info("数值列key: %s", sorted(numeric_keys))
+        if not numeric_keys:
+            return None
+        # 在问题中查找出现的数值列 key 名
+        matched = []
+        for key in numeric_keys:
+            if key in question:
+                matched.append(key)
+        if matched:
+            best = max(matched, key=len)
+            logger.info("从问题中提取到列名: '%s' (匹配key=%s)", best, matched)
+            return best
+        return None
+
     def _identify_target_key(self, question: str, chunks: list) -> str | None:
         """让 LLM 从原始 chunk 内容中判断要加总的 key 名"""
         if not chunks:
             return None
-        # 发前 3 个 chunk 的原始内容
-        sample = "\n---\n".join(doc.page_content for doc, _ in chunks[:3])
+        # 发前 5 个 chunk 的原始内容
+        sample = "\n---\n".join(doc.page_content for doc, _ in chunks[:5])
         prompt = (
             f"以下是文档中的几条记录（key:value 格式）：\n{sample}\n\n"
             f"问题：{question}\n"
-            f"请判断要加总的是哪个 key 的数值？只返回 key 名（如'结果'），不要其他内容。"
+            f"请判断要加总求和的是哪个 key 对应的数值？\n"
+            f"注意：只能选择值为数字的 key（如'结果'、'金额'、'价格'等），不能选择文本类型的 key。\n"
+            f"只返回 key 名，不要其他内容。"
         )
         try:
             response = self.llm.invoke(prompt)
-            key = response.content.strip()
+            key = response.content.strip().strip("'\"")
             logger.info("列识别: LLM返回key='%s'", key)
             return key
         except Exception:
             pass
         return None
 
-    def _sum_by_key(self, chunks: list, key_name: str) -> tuple[float, int, list[float]]:
-        """从所有 chunk 中提取指定 key 的数值并求和"""
+    def _sum_by_key(self, chunks: list, key_name: str) -> tuple[float, int, list[float], str]:
+        """从所有 chunk 中提取指定 key 的数值并求和，找不到数值时自动回退"""
         values = []
         for doc, _ in chunks:
             for line in doc.page_content.split("\n"):
@@ -198,7 +233,36 @@ class RAGEngine:
                             values.append(float(val))
                         except ValueError:
                             pass
-        return round(sum(values), 2), len(values), values
+
+        # 回退：如果识别的 key 无法提取数值，尝试所有 key 找到第一个能求和的
+        if not values:
+            logger.warning("列'%s'无法提取数值，尝试自动识别数值列", key_name)
+            key_candidates: dict[str, list[float]] = {}
+            for doc, _ in chunks[:300]:
+                for line in doc.page_content.split("\n"):
+                    if ":" in line:
+                        k, _, val = line.partition(":")
+                        k = k.strip()
+                        val = val.strip().replace(",", "")
+                        try:
+                            num = float(val)
+                            key_candidates.setdefault(k, []).append(num)
+                        except ValueError:
+                            pass
+            # 选条目最多的数值列
+            logger.info("数值列候选: %s", {k: len(v) for k, v in key_candidates.items()})
+            best_key = None
+            best_count = 0
+            for k, vals in key_candidates.items():
+                if len(vals) > best_count:
+                    best_count = len(vals)
+                    best_key = k
+            if best_key:
+                logger.info("自动识别数值列: '%s' (共 %d 条)", best_key, len(key_candidates[best_key]))
+                values = key_candidates[best_key]
+                key_name = best_key
+
+        return round(sum(values), 2), len(values), values, key_name
 
     def answer(self, question: str, top_k: int = None, document_ids: list[int] | None = None,
                history: list[dict] | None = None, strategy: str = None):
@@ -276,19 +340,23 @@ class RAGEngine:
                 sheet_counts[sn] = sheet_counts.get(sn, 0) + 1
             logger.info("聚合查询: 共 %d 个 chunk, 来源分布: %s", len(selected), sheet_counts)
 
-            # 两步聚合：LLM 识别 key → Python 精确求和
-            target_key = self._identify_target_key(question, selected)
+            # 两步聚合：先尝试从用户问题中提取指定列名，再 LLM 识别
+            target_key = self._extract_column_from_question(question, selected)
+            if not target_key:
+                target_key = self._identify_target_key(question, selected)
             if target_key:
-                total, count, values = self._sum_by_key(selected, target_key)
+                total, count, values, actual_key = self._sum_by_key(selected, target_key)
                 if count > 0:
                     values_str = " + ".join(str(v) for v in values)
                     agg_precomputed = (
-                        f"\n\n【系统精确计算】列\"{target_key}\"的总和 = {total}（共 {count} 条记录）\n"
+                        f"\n\n【系统精确计算】列\"{actual_key}\"的总和 = {total}（共 {count} 条记录）\n"
                         f"各项数值：{values_str}\n"
                         f"以上数值和总和已由系统精确计算。如果用户要求展示计算过程，请列出各项数值并给出总和；"
                         f"否则直接给出总和即可，不要自行重新计算。"
                     )
-                    logger.info("聚合计算: key=%s, 总和=%.2f, 条数=%d", target_key, total, count)
+                    logger.info("聚合计算: key=%s, 总和=%.2f, 条数=%d", actual_key, total, count)
+                else:
+                    logger.warning("聚合计算: key='%s' 无法提取数值", target_key)
 
         # 5. 构建上下文（每段标注来源文件名）
         context_parts = []
