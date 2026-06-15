@@ -116,8 +116,11 @@ class DocumentProcessor:
             # Excel chunk 保留 sheet_name 元数据
             if hasattr(chunk, "metadata") and "sheet_name" in chunk.metadata:
                 metadata["sheet_name"] = chunk.metadata["sheet_name"]
+
+            # 文件名前缀：使文件名中的学号、姓名、关键词可被检索
+            text = f"[文件: {file_name}]\n{chunk.page_content}"
             results.append({
-                "text": chunk.page_content,
+                "text": text,
                 "metadata": metadata,
             })
         return results

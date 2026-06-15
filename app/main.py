@@ -2,10 +2,11 @@ import logging
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import ingestion, qa
+from app.core.rag_engine import RAGEngine
 from app.core.vector_store import VectorStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -13,12 +14,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    # 全局初始化：向量存储（首次运行会下载 embedding 模型）
+    # 全局初始化：向量存储和 RAG 引擎
     vs = VectorStore()
     application.state.vector_store = vs
+    application.state.rag_engine = RAGEngine(vs)
     yield
     # 资源清理
-    application.state.vector_store = None
+    application.state.rag_engine = None
+    vs.close()
 
 
 app = FastAPI(

@@ -73,3 +73,22 @@ class VectorStore:
             (Document(page_content=doc, metadata=meta), 0.0)
             for doc, meta in zip(docs, metadatas)
         ]
+
+    def get_document_names(self) -> dict[int, str]:
+        """获取所有文档ID→文件名映射（用于文件名匹配回退）"""
+        results = self._db.get(include=["metadatas"])
+        doc_names = {}
+        for meta in results.get("metadatas", []):
+            did = meta.get("document_id")
+            fn = meta.get("file_name", "")
+            if did is not None and did not in doc_names:
+                doc_names[did] = fn
+        return doc_names
+
+    def close(self):
+        """释放 Chroma 底层资源（HTTP 连接、文件句柄）"""
+        try:
+            if hasattr(self._db, '_client'):
+                self._db._client.close()
+        except Exception as e:
+            logger.warning("关闭 Chroma 客户端时出错: %s", e)
