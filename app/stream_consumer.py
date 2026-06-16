@@ -85,9 +85,9 @@ def process_message(ch, method, properties, body):
         temp_path = os.path.join(tempfile.gettempdir(), f"rag_{document_id}_{int(time.time())}{suffix}")
         download_from_minio(file_path, temp_path)
 
-        # 2. 调用 Python AI 服务进行向量化
+        # 2. 调用 Python AI 服务进行向量化（发送 MinIO 对象路径，不是本地临时路径）
         ingest_req = {
-            "file_path": temp_path,
+            "file_path": file_path,
             "document_id": document_id,
             "file_name": file_name
         }

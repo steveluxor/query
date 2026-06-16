@@ -1,19 +1,23 @@
+import sys
 from pathlib import Path
 
-import win32com.client
-import pythoncom
+if sys.platform == "win32":
+    import win32com.client
+    import pythoncom
 from langchain_text_splitters.character import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_core.documents import Document
 
 
 class WordDocLoader:
-    """使用 Word COM 解析旧版 .doc 文件"""
+    """使用 Word COM 解析旧版 .doc 文件（仅 Windows）"""
 
     def __init__(self, file_path: str):
         self.file_path = file_path
 
     def load(self) -> list[Document]:
+        if sys.platform != "win32":
+            raise RuntimeError("旧版 .doc 格式仅在 Windows 上支持，请转换为 .docx 后重试")
         pythoncom.CoInitialize()
         word = None
         doc = None
@@ -91,6 +95,9 @@ class DocumentProcessor:
         """解析文档并按策略切片，返回 [{text, metadata}, ...]"""
         path = Path(file_path)
         ext = path.suffix.lower()
+
+        import logging
+        logging.getLogger(__name__).info(f"文件路径: {file_path}, 检测扩展名: {ext}")
 
         loader_cls = self.LOADER_MAP.get(ext)
         if loader_cls is None:
