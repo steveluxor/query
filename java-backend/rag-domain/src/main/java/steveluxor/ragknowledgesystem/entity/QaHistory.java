@@ -19,4 +19,5 @@ public class QaHistory extends BaseEntity {
     private String answer;
     private String sources;
     private Long sessionId;
+    private Boolean isAgg;
 }

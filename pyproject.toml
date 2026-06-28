@@ -29,6 +29,9 @@ dependencies = [
     "minio>=7.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

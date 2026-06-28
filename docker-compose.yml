@@ -67,7 +67,7 @@ services:
       - minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -83,16 +83,18 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "ollama serve &
-       sleep 3 &&
-       ollama pull nomic-embed-text &&
-       wait"
+    command:
+      - |
+        ollama serve &
+        sleep 5
+        ollama pull nomic-embed-text
+        wait
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 10
+      start_period: 120s
     restart: unless-stopped
     networks:
       - rag-network
@@ -116,7 +118,13 @@ services:
       EMBEDDING_DEVICE: cpu
       VECTOR_STORE_PATH: /app/chroma_db
     volumes:
-      - ./chroma_db:/app/chroma_db
+      - chroma-data:/app/chroma_db
+      - temp-files:/tmp/rag_temp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     depends_on:
       ollama:
         condition: service_healthy
@@ -137,12 +145,13 @@ services:
       PYTHON_BASE_URL: http://python-ai:8000
       VECTOR_STORE_PATH: /app/chroma_db
     volumes:
-      - ./chroma_db:/app/chroma_db
+      - chroma-data:/app/chroma_db
+      - temp-files:/tmp/rag_temp
     depends_on:
       rabbitmq:
         condition: service_healthy
       python-ai:
-        condition: service_started
+        condition: service_healthy
     command: python -m app.stream_consumer
     restart: unless-stopped
     networks:
@@ -165,7 +174,7 @@ services:
       rabbitmq:
         condition: service_healthy
       python-ai:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - rag-network
@@ -189,6 +198,8 @@ volumes:
   redis-data:
   minio-data:
   ollama-data:
+  chroma-data:
+  temp-files:
 
 networks:
   rag-network:

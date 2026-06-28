@@ -77,12 +77,21 @@ public class QaServiceImpl implements QaService {
     public Result ask(AskRequest request) {
         Long userId = CurrentUser.get();
         try {
-            // 1. 生成缓存 Key
-            // 去除标点和空格后再计算 MD5
+            // 1. 生成缓存 Key（拼入上一个问题，确保不同上下文下同一问题有独立缓存）
             String normalized = request.getQuestion()
-                    .replaceAll("[？?！!。，,\\s]", "");  // 去掉标点和空格
+                    .replaceAll("[？?！!。，,\\s]", "");
             String sessionIdPart = request.getSessionId() != null ? String.valueOf(request.getSessionId()) : "none";
-            String cacheKey = QA_CACHE_PREFIX + userId + ":" + sessionIdPart + ":" + DigestUtils.md5DigestAsHex(normalized.getBytes(StandardCharsets.UTF_8));
+            // 获取上一个问题作为 cache key 的一部分
+            String prevQuestionHash = "none";
+            if (request.getSessionId() != null) {
+                List<QaHistory> recentHistory = qaHistoryMapper.selectBySessionId(request.getSessionId(), userId);
+                if (!recentHistory.isEmpty()) {
+                    String lastQuestion = recentHistory.get(recentHistory.size() - 1).getQuestion();
+                    String lastNormalized = lastQuestion.replaceAll("[？?！!。，,\\s]", "");
+                    prevQuestionHash = DigestUtils.md5DigestAsHex(lastNormalized.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            String cacheKey = QA_CACHE_PREFIX + userId + ":" + sessionIdPart + ":" + prevQuestionHash + ":" + DigestUtils.md5DigestAsHex(normalized.getBytes(StandardCharsets.UTF_8));
 
             // 2. 尝试从 Redis 获取缓存
             String cachedJson = redisTemplate.opsForValue().get(cacheKey);
@@ -118,6 +127,7 @@ public class QaServiceImpl implements QaService {
                                 Map<String, String> item = new HashMap<>();
                                 item.put("question", h.getQuestion());
                                 item.put("answer", h.getAnswer());
+                                item.put("is_agg", String.valueOf(Boolean.TRUE.equals(h.getIsAgg())));
                                 return item;
                             })
                             .collect(Collectors.toList());
@@ -146,6 +156,7 @@ public class QaServiceImpl implements QaService {
             String answer = (String) pythonResp.getOrDefault("answer", "");
             Object sources = pythonResp.getOrDefault("sources", List.of());
             String sourcesJson = objectMapper.writeValueAsString(sources);
+            Boolean isAgg = (Boolean) pythonResp.getOrDefault("is_agg", false);
 
             // 4. 保存问答历史
             QaHistory history = QaHistory.builder()
@@ -154,6 +165,7 @@ public class QaServiceImpl implements QaService {
                     .question(request.getQuestion())
                     .answer(answer)
                     .sources(sourcesJson)
+                    .isAgg(isAgg)
                     .createUser(userId)
                     .build();
             qaHistoryMapper.insert(history);

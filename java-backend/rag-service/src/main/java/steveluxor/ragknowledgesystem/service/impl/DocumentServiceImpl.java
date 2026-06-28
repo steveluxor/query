@@ -62,7 +62,7 @@ public class DocumentServiceImpl implements DocumentService {
     // 公共方法
     // ============================================
 
-    private void deleteVector(Long documentId) {
+    private void deleteVector(Long documentId) throws Exception {
         try {
             HttpRequest delReq = HttpRequest.newBuilder()
                     .uri(URI.create(pythonBaseUrl + INGEST_PATH + "/" + documentId))
@@ -72,16 +72,18 @@ public class DocumentServiceImpl implements DocumentService {
             httpClient.send(delReq, HttpResponse.BodyHandlers.ofString());
             log.info("向量删除成功: documentId={}", documentId);
         } catch (Exception e) {
-            log.warn("向量删除失败（不影响后续操作）: documentId={}", documentId, e);
+            log.error("向量删除失败: documentId={}", documentId, e);
+            throw new Exception("向量删除失败: " + e.getMessage(), e);
         }
     }
 
-    private void deleteMinioFile(String filePath) {
+    private void deleteMinioFile(String filePath) throws Exception {
         try {
             fileService.deleteFile(filePath);
             log.info("文件删除成功: filePath={}", filePath);
         } catch (Exception e) {
-            log.warn("文件删除失败（不影响后续操作）: filePath={}", filePath, e);
+            log.error("文件删除失败: filePath={}", filePath, e);
+            throw new Exception("文件删除失败: " + e.getMessage(), e);
         }
     }
 
@@ -148,18 +150,6 @@ public class DocumentServiceImpl implements DocumentService {
         } finally {
             redisTemplate.delete(lockKey);
         }
-    }
-
-    // 获取文档URL
-    @Override
-    public Result getDocumentUrl(Long documentId) throws Exception {
-        Document document = documentMapper.selectById(documentId);
-        if (document == null) {
-            throw new BizException(FILE_NOT_EXIST);
-        }
-
-        String url = fileService.getFileUrl(document.getFilePath());
-        return Result.ok(url);
     }
 
     @Override

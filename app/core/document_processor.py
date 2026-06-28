@@ -50,24 +50,44 @@ class ExcelLoader:
         wb = load_workbook(self.file_path, read_only=True, data_only=True)
         docs = []
         for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
-            if rows:
-                headers = [str(h) if h is not None else f"col{i}" for i, h in enumerate(rows[0])]
-                for row in rows[1:]:
-                    # 跳过汇总行（第一列包含"总计"/"合计"/"小计"等）
-                    first_cell = str(row[0]).strip() if row[0] is not None else ""
-                    if first_cell in self.SUMMARY_KEYWORDS:
-                        continue
-                    pairs = []
-                    for header, value in zip(headers, row):
-                        if value is not None:
-                            pairs.append(f"{header}: {value}")
-                    if pairs:
-                        doc = Document(
-                            page_content="\n".join(pairs),
-                            metadata={"sheet_name": ws.title},
-                        )
-                        docs.append(doc)
+            rows_iter = ws.iter_rows(values_only=True)
+            headers = None
+            excel_row_num = 0  # Excel 物理行号
+            for row in rows_iter:
+                excel_row_num += 1  # 每行递增
+                if headers is None:
+                    headers = [str(h) if h is None or str(h).strip() == "" else str(h) for i, h in enumerate(row)]
+                    # 确保所有列名唯一
+                    seen = {}
+                    unique_headers = []
+                    for h in headers:
+                        if h in seen:
+                            seen[h] += 1
+                            unique_headers.append(f"{h}_{seen[h]}")
+                        else:
+                            seen[h] = 0
+                            unique_headers.append(h)
+                    headers = unique_headers
+                    continue
+                # 跳过空行
+                if all(c is None for c in row):
+                    continue
+                # 跳过汇总行（任意列包含"总计"/"合计"/"小计"等）
+                row_text = " ".join(str(c).strip() for c in row if c is not None)
+                if any(kw in row_text for kw in self.SUMMARY_KEYWORDS):
+                    continue
+                pairs = [f"行号: {excel_row_num}"]
+                for header, value in zip(headers, row):
+                    if value is not None:
+                        pairs.append(f"{header}: {value}")
+                    else:
+                        pairs.append(f"{header}: (空)")
+                if pairs:
+                    doc = Document(
+                        page_content="\n".join(pairs),
+                        metadata={"sheet_name": ws.title, "row_number": excel_row_num},
+                    )
+                    docs.append(doc)
         wb.close()
         return docs
 
@@ -120,9 +140,12 @@ class DocumentProcessor:
                 "chunk_index": i,
                 "source": file_name,
             }
-            # Excel chunk 保留 sheet_name 元数据
-            if hasattr(chunk, "metadata") and "sheet_name" in chunk.metadata:
-                metadata["sheet_name"] = chunk.metadata["sheet_name"]
+            # Excel chunk 保留 sheet_name 和 row_number 元数据
+            if hasattr(chunk, "metadata"):
+                if "sheet_name" in chunk.metadata:
+                    metadata["sheet_name"] = chunk.metadata["sheet_name"]
+                if "row_number" in chunk.metadata:
+                    metadata["row_number"] = chunk.metadata["row_number"]
 
             # 文件名前缀：使文件名中的学号、姓名、关键词可被检索
             text = f"[文件: {file_name}]\n{chunk.page_content}"
@@ -131,3 +154,4 @@ class DocumentProcessor:
                 "metadata": metadata,
             })
         return results
+

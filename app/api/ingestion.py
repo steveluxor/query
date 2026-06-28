@@ -40,15 +40,18 @@ async def ingest_document(
 ):
     """接收文档，执行解析、切片、向量化并存入向量库"""
     file_path = request.file_path
-    temp_file = None
+    need_cleanup = False
 
     try:
         # 如果文件不存在（跨容器调用），从 MinIO 下载
         if not os.path.exists(file_path):
             suffix = os.path.splitext(request.file_name)[1] if "." in request.file_name else ""
-            temp_file = os.path.join(tempfile.gettempdir(), f"rag_{request.document_id}{suffix}")
-            _get_minio_client().fget_object(settings.minio_bucket, file_path, temp_file)
-            file_path = temp_file
+            file_path = os.path.join(tempfile.gettempdir(), f"rag_{request.document_id}{suffix}")
+            _get_minio_client().fget_object(settings.minio_bucket, request.file_path, file_path)
+            need_cleanup = True
+        # 共享目录中的临时文件也需要清理
+        elif file_path.startswith("/tmp/"):
+            need_cleanup = True
 
         chunks = processor.process(
             file_path=file_path,
@@ -60,9 +63,9 @@ async def ingest_document(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="文件未找到")
     finally:
-        # 清理临时文件
-        if temp_file and os.path.exists(temp_file):
-            os.unlink(temp_file)
+        # 清理临时文件（共享目录或本地下载的）
+        if need_cleanup and os.path.exists(file_path):
+            os.unlink(file_path)
 
     texts = [c["text"] for c in chunks]
     metadatas = [c["metadata"] for c in chunks]

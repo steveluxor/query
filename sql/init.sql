@@ -46,11 +46,11 @@ CREATE TABLE IF NOT EXISTS qa_history (
     answer TEXT,
     sources TEXT,
     session_id BIGINT,
+    is_agg TINYINT(1) DEFAULT 0 COMMENT '本次回答是否使用聚合查询',
     create_time DATETIME,
     update_time DATETIME,
     create_user BIGINT,
     update_user BIGINT
 );
 
--- qa_history 加 session_id 列（兼容旧表）
-ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS session_id BIGINT DEFAULT NULL COMMENT '所属会话ID';
+-- session_id 列已在 CREATE TABLE 中定义，无需 ALTER

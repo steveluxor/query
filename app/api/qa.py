@@ -27,4 +27,5 @@ async def ask_question(
     return AnswerResponse(
         answer=result["answer"],
         sources=result["sources"],
+        is_agg=result.get("is_agg", False),
     )

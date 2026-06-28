@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 
 RUN sed -i '/pywin32/d' pyproject.toml && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn .
 
 COPY . .
 

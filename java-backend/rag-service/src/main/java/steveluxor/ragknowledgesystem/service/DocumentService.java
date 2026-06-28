@@ -7,9 +7,6 @@ public interface DocumentService {
     // 上传文档
     Result uploadDocument(MultipartFile file, Long userId, Integer permission);
 
-    // 获取文档URL
-    Result getDocumentUrl(Long documentId) throws Exception;
-
     // 删除文档
     Result deleteDocument(Long documentId, Long userId) throws Exception;
 

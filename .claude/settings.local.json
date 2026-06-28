@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill /F /IM \"Docker Desktop.exe\")",
+      "Bash(taskkill /F /IM \"dockerd.exe\")",
+      "Bash(taskkill /F /IM \"docker.exe\")",
+      "Bash(net stop *)",
+      "Bash(takeown /F \"C:\\\\ProgramData\\\\DockerDesktop\" /R /A)"
+    ]
+  }
+}

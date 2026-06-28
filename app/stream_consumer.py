@@ -15,7 +15,6 @@ RabbitMQ 消费者：异步处理文档向量化任务
 import json
 import logging
 import os
-import tempfile
 import time
 
 import minio
@@ -25,6 +24,9 @@ import requests
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# 共享临时目录（与 python-ai 容器共享）
+TEMP_DIR = "/tmp/rag_temp"
 
 _minio_client: minio.Minio | None = None
 
@@ -80,14 +82,15 @@ def process_message(ch, method, properties, body):
 
     temp_path = None
     try:
-        # 1. 从 MinIO 下载文件
+        # 1. 从 MinIO 下载到共享临时目录
+        os.makedirs(TEMP_DIR, exist_ok=True)
         suffix = os.path.splitext(file_name)[1] if "." in file_name else ""
-        temp_path = os.path.join(tempfile.gettempdir(), f"rag_{document_id}_{int(time.time())}{suffix}")
+        temp_path = os.path.join(TEMP_DIR, f"rag_{document_id}_{int(time.time())}{suffix}")
         download_from_minio(file_path, temp_path)
 
-        # 2. 调用 Python AI 服务进行向量化（发送 MinIO 对象路径，不是本地临时路径）
+        # 2. 调用 Python AI 服务进行向量化（传递共享目录路径）
         ingest_req = {
-            "file_path": file_path,
+            "file_path": temp_path,
             "document_id": document_id,
             "file_name": file_name
         }
@@ -114,9 +117,7 @@ def process_message(ch, method, properties, body):
         except Exception:
             pass
 
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+    # 注意：临时文件由 ingestion.py 在向量化完成后清理
 
 
 def main():
@@ -190,3 +191,4 @@ def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     main()
+

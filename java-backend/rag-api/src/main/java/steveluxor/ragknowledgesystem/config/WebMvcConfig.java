@@ -27,7 +27,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/user/login",
                         "/user/send-code",
-                        "/document/*/status"
+                        "/document/*/status",
+                        "/document/*/download"
                 );
 
         // 限流拦截器（放在登录之后，需要用户已登录）
@@ -36,7 +37,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/user/login",
                         "/user/send-code",
-                        "/document/*/status"
+                        "/document/*/status",
+                        "/document/*/download"
                 );
     }
 }

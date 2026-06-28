@@ -173,7 +173,7 @@
                     </td>
                     <td>
                         <div class="action-btns">
-                            ${doc.id ? `<button class="btn btn-secondary btn-sm" data-action="url" data-id="${doc.id}">获取链接</button>` : ''}
+                            ${doc.id ? `<button class="btn btn-secondary btn-sm" data-action="download" data-id="${doc.id}">下载</button>` : ''}
                             ${isOwner && doc.id ? `<button class="btn btn-secondary btn-sm" data-action="reupload" data-id="${doc.id}">重新上传</button>` : ''}
                             ${isOwner && doc.status === 'FAILED' && doc.id ? `<button class="btn btn-warning btn-sm" data-action="reingest" data-id="${doc.id}">重新向量化</button>` : ''}
                             ${isOwner && doc.id ? `<button class="btn btn-danger btn-sm" data-action="delete" data-id="${doc.id}">删除</button>` : ''}
@@ -876,7 +876,15 @@
 
             if (checkResult.exists) {
                 if (checkResult.isOwner) {
-                    return await overwriteUpload(file, checkResult.existingId, permission);
+                    const action = await showDuplicateDialog(file.name);
+                    if (action === 'overwrite') {
+                        return await overwriteUpload(file, checkResult.existingId, permission);
+                    } else if (action === 'rename') {
+                        file = await promptNewName(file);
+                        if (!file) return;
+                    } else {
+                        return;
+                    }
                 } else {
                     showToast('该文件名已被其他用户使用', 'info');
                     file = await promptNewName(file);
@@ -1030,22 +1038,22 @@
             return;
         }
 
-        if (action === 'url') {
+        if (action === 'download') {
             try {
                 target.disabled = true;
-                target.textContent = '获取中...';
-                const url = await Api.getDocumentUrl(id);
-                try {
-                    await navigator.clipboard.writeText(url);
-                    showToast('链接已复制到剪贴板', 'success');
-                } catch {
-                    showToast(`链接: ${url}`, 'info');
-                }
+                target.textContent = '下载中...';
+                // 浏览器原生下载，token 放在 URL 中
+                const link = document.createElement('a');
+                link.href = `/document/${id}/download?token=${Api.getToken()}`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showToast('文件下载中...', 'success');
             } catch (err) {
-                showToast(`获取链接失败: ${err.message}`, 'error');
+                showToast(`下载失败: ${err.message}`, 'error');
             } finally {
                 target.disabled = false;
-                target.textContent = '获取链接';
+                target.textContent = '下载';
             }
         } else if (action === 'delete') {
             try {

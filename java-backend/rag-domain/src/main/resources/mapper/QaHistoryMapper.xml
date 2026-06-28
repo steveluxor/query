@@ -11,6 +11,7 @@
             <if test="sources != null">sources,</if>
             <if test="createUser != null">create_user,</if>
             <if test="sessionId != null">session_id,</if>
+            <if test="isAgg != null">is_agg,</if>
             create_time,
             update_time,
         </trim>
@@ -21,6 +22,7 @@
             <if test="sources != null">#{sources},</if>
             <if test="createUser != null">#{createUser},</if>
             <if test="sessionId != null">#{sessionId},</if>
+            <if test="isAgg != null">#{isAgg},</if>
             #{createTime},
             #{updateTime},
         </trim>

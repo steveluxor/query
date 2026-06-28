@@ -1,21 +1,41 @@
 package steveluxor.ragknowledgesystem.controller;
 
+import io.minio.errors.*;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.tomcat.util.http.fileupload.IOUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import steveluxor.ragknowledgesystem.common.JwtUtils;
 import steveluxor.ragknowledgesystem.common.Result;
+import steveluxor.ragknowledgesystem.entity.Document;
+import steveluxor.ragknowledgesystem.mapper.DocumentMapper;
 import steveluxor.ragknowledgesystem.service.DocumentService;
+import steveluxor.ragknowledgesystem.service.FileService;
+
+import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 @RestController
 @RequestMapping("/document")
 @Slf4j
 public class DocumentController {
     private final DocumentService documentService;
+    private final FileService fileService;
+    private final DocumentMapper documentMapper;
+    private final JwtUtils jwtUtils;
 
     @Autowired
-    public DocumentController(DocumentService documentService) {
+    public DocumentController(DocumentService documentService,
+                               FileService fileService,
+                               DocumentMapper documentMapper,
+                               JwtUtils jwtUtils) {
         this.documentService = documentService;
+        this.fileService = fileService;
+        this.documentMapper = documentMapper;
+        this.jwtUtils = jwtUtils;
     }
 
     @PostMapping("/upload")
@@ -26,10 +46,24 @@ public class DocumentController {
         return documentService.uploadDocument(file, userId, permission);
     }
 
-    @GetMapping("/{id}/url")
-    public Result getDocumentUrl(@PathVariable("id") Long documentId) throws Exception {
-        log.info("获取文档URL请求: documentId={}", documentId);
-        return documentService.getDocumentUrl(documentId);
+    @GetMapping("/{id}/download")
+    public void downloadDocument(@PathVariable("id") Long documentId,
+                                 @RequestParam(value = "token", required = false) String token,
+                                 HttpServletResponse response) throws Exception {
+        log.info("下载文件请求: documentId={}, hasToken={}", documentId, token != null);
+        Document document = documentMapper.selectById(documentId);
+        if (document == null) {
+            response.setStatus(404);
+            return;
+        }
+
+        try (InputStream stream = fileService.getFileInputStream(document.getFilePath())) {
+            String encodedFileName = URLEncoder.encode(document.getFileName(), StandardCharsets.UTF_8).replace("+", "%20");
+            response.setContentType(document.getFileType());
+            response.setHeader("Content-Disposition", "attachment; filename*=UTF-8''" + encodedFileName);
+            stream.transferTo(response.getOutputStream());
+            response.getOutputStream().flush();
+        }
     }
 
     @GetMapping("/list")

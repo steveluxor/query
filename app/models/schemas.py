@@ -17,6 +17,7 @@ class HistoryItem(BaseModel):
     """单轮问答历史"""
     question: str
     answer: str
+    is_agg: bool = False
 
 
 class QuestionRequest(BaseModel):
@@ -38,3 +39,4 @@ class Source(BaseModel):
 class AnswerResponse(BaseModel):
     answer: str
     sources: list[Source]
+    is_agg: bool = False

@@ -86,10 +86,6 @@ const Api = (() => {
             return request(`/document/list?userId=${userId}`);
         },
 
-        getDocumentUrl(documentId) {
-            return request(`/document/${documentId}/url`);
-        },
-
         deleteDocument(documentId, userId) {
             return request(`/document/${documentId}?userId=${userId}`, {
                 method: 'DELETE',
