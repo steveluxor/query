@@ -4,19 +4,29 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 import steveluxor.ragknowledgesystem.common.Constants;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
 import steveluxor.ragknowledgesystem.common.Result;
 
-import java.util.concurrent.TimeUnit;
+import java.util.Collections;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Component
 public class RateLimitInterceptor implements HandlerInterceptor {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final DefaultRedisScript<Long> RATE_LIMIT_SCRIPT = new DefaultRedisScript<>();
+
+    static {
+        RATE_LIMIT_SCRIPT.setLocation(new ClassPathResource("scripts/rate_limit.lua"));
+        RATE_LIMIT_SCRIPT.setResultType(Long.class);
+    }
+
     private final StringRedisTemplate redisTemplate;
 
     @Autowired
@@ -28,22 +38,20 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         Long userId = CurrentUser.get();
         if (userId == null) {
-            return true; // 未登录用户不进行限流（由 LoginInterceptor 处理）
+            return true;
         }
 
-        // 生成限流 Key：rate:{userId}:{当前分钟}
-        long currentMinute = System.currentTimeMillis() / 1000 / 60;
-        String key = Constants.RATE_LIMIT_PREFIX + userId + ":" + currentMinute;
+        long now = System.currentTimeMillis();
+        String key = Constants.RATE_LIMIT_PREFIX + userId;
+        String uniqueMember = userId + ":" + now + ":" + ThreadLocalRandom.current().nextLong();
+        Long result = redisTemplate.execute(RATE_LIMIT_SCRIPT,
+                Collections.singletonList(key),
+                String.valueOf(now),
+                String.valueOf(Constants.RATE_LIMIT_WINDOW),
+                String.valueOf(Constants.RATE_LIMIT_MAX),
+                uniqueMember);
 
-        // 原子递增
-        Long count = redisTemplate.opsForValue().increment(key);
-        if (count != null && count == 1) {
-            // 第一次请求，设置 60 秒过期
-            redisTemplate.expire(key, Constants.RATE_LIMIT_WINDOW, TimeUnit.SECONDS);
-        }
-
-        // 判断是否超过限制
-        if (count != null && count > Constants.RATE_LIMIT_MAX) {
+        if (result != null && result == 0) {
             response.setContentType("application/json;charset=UTF-8");
             response.setStatus(429);
             OBJECT_MAPPER.writeValue(response.getWriter(),

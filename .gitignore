@@ -21,3 +21,8 @@ java-backend/.mvn/
 
 # IDE
 .idea/
+
+# Temp
+cookies.txt
+desktop.ini
+待修改.txt

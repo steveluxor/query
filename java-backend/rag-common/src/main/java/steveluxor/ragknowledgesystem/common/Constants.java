@@ -32,8 +32,6 @@ public class Constants {
     public static final String FILE_NOT_EXIST = "文件不存在";
     public static final String FILE_NO_PERMISSION = "无权删除他人文件";
     public static final String DOC_UPLOAD_FAILED = "文档上传失败";
-    public static final String DOC_DELETE_FAILED = "文档删除失败";
-    public static final String DOC_GET_URL_FAILED = "获取文档URL失败";
 
     // 问答相关
     public static final String AI_SERVICE_ERROR_PREFIX = "AI 服务返回错误: ";
@@ -45,12 +43,14 @@ public class Constants {
 
     // 通用
     public static final String SERVER_ERROR = "服务器内部错误";
+    public static final String PARAM_FORMAT_ERROR = "参数格式错误";
+    public static final String MISSING_PARAM = "缺少必要参数";
 
     // Redis 问答缓存
     public static final String QA_CACHE_PREFIX = "qa:cache:";
     public static final Long QA_CACHE_TTL = 30L; // 分钟
 
-    // Redis 接口限流
+    // Redis 接口限流（ZSET 滑动窗口，key 格式 rate:{userId}）
     public static final String RATE_LIMIT_PREFIX = "rate:";
     public static final Long RATE_LIMIT_MAX = 30L; // 每分钟最大请求数
     public static final Long RATE_LIMIT_WINDOW = 60L; // 限流窗口（秒）

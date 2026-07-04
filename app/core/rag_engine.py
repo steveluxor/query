@@ -5,71 +5,9 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from app.config import settings
 from app.core.vector_store import VectorStore
+from app.prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
-
-
-PROMPT_TEMPLATE = """你是一个智能问答助手。以下是从不同文档中检索到的相关内容，每段都标注了来源文件名。
-
-{context}
-
-{history}
-
-用户问题：{question}
-
-要求：
-1. 直接回答问题，不要提及文档检索过程或"没有找到相关文档"
-2. 只引用与问题直接相关的文档内容，忽略无关文档
-3. 引用时请注明来源文件名
-4. 如果文档中有相关信息，优先使用文档内容回答
-5. 如果文档中没有相关信息，直接用你的知识回答，不要提及检索过程
-6. 严格遵守用户在问题中提出的所有要求和限制条件"""
-
-REWRITE_SYSTEM_PROMPT = """你是一个查询改写助手。将用户的问题改写为完整的搜索查询，以便在文档库中检索相关内容。
-
-要求：
-- 将缩写、简写补全为完整名称（如"qt"→"Qt"、"py"→"Python"）
-- 如果问题是关于个人（如"汪小丹"），补充可能的学号、实验名称等关键词
-- 如果问题很短（少于5个字），扩展为更具体的查询
-- 保持关键术语的大小写规范
-
-只返回改写后的查询，不要任何额外内容。"""
-
-REWRITE_WITH_HISTORY_PROMPT = """你是一个查询改写助手。根据对话历史，将用户的最新问题改写为独立、自包含的查询，使得不需要看历史也能理解查询意图。
-
-改写规则：
-- 如果最新问题很简短（如"第140呢"、"那前10个呢"、"总共多少"），必须结合上一轮的问题和回答来补全意图,不要漏掉信息,比如检索范围
-- "第N呢"类追问表示"上一个问题的条件不变，只改序号"，需要从上文提取排序条件（如"贵"、"便宜"）补全到新问题中
-- 保持上一轮的排序方向和排序字段不变
-
-示例：
-历史：用户问"第139贵的是什么"，助手回答了第139贵的商品
-用户新问题："第140呢" → 改写为："第140贵的是什么"
-
-历史：用户问"最便宜的是什么"，助手回答了最便宜的商品
-用户新问题："第2便宜的呢" → 改写为："第2便宜的是什么"
-
-只返回改写后的查询，不要任何额外内容。如果问题本身已经很清晰，直接返回原问题。"""
-
-INTENT_ANALYSIS_PROMPT = """分析用户问题的意图，返回两个字段，用逗号分隔。
-
-第一个字段：是否需要检索文档回答（"需要"或"不需要"）
-第二个字段：如果需要检索，采用什么策略（"relevance"或"diversity"）
-
-判断规则：
-- 不需要检索：问候、闲聊、通用知识（如"你是谁"、"你好"、"今天天气"）
-- 需要检索 + relevance：针对具体文档内容的精确查询（如"汪小丹的成绩"）
-- 需要检索 + diversity：需要综合多文档对比、总结、分析的查询（如"对比各同学成绩"、"总结所有实验报告"）
-
-问题：{question}
-
-回答："""
-
-DIRECT_ANSWER_PROMPT = """你是一个智能问答助手。请直接回答用户的问题。
-
-{history}
-
-用户问题：{question}"""
 
 
 class RAGEngine:
@@ -84,13 +22,17 @@ class RAGEngine:
             temperature=0.1,
             max_tokens=4096,
         )
-        self.prompt = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+        self.prompt = ChatPromptTemplate.from_template(PromptManager.get("rag", "template"))
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除
     SCORE_THRESHOLD = 0.85
     DEFAULT_TOP_K = 10  # 默认返回 chunk 数量
 
     MAX_HISTORY_TURNS = 5
+
+    # 摘要压缩：历史超过此轮数时，较早的轮次压缩为摘要
+    SUMMARY_COMPRESS_THRESHOLD = 4
+    SUMMARY_KEEP_RECENT = 2
 
     # 间隔阈值：最大间隔低于此值时视为均匀分布，多取结果
     MIN_GAP_THRESHOLD = 0.05
@@ -248,13 +190,47 @@ class RAGEngine:
             selected.extend(remaining[:top_k - len(selected)])
         return selected
 
-    def _format_history(self, history: list | None) -> str:
+    def _summarize_history(self, history: list | None) -> str:
+        """历史超过阈值时，将较早轮次压缩为摘要，返回空字符串表示无需压缩"""
+        if not history or len(history) < self.SUMMARY_COMPRESS_THRESHOLD:
+            return ""
+        older = history[:-self.SUMMARY_KEEP_RECENT]
+        text = []
+        for h in older:
+            if isinstance(h, dict):
+                q = h.get("question", "")
+                a = h.get("answer", "")
+            else:
+                q = getattr(h, "question", "")
+                a = getattr(h, "answer", "")
+            text.append(f"用户：{q}")
+            text.append(f"助手：{a[:200]}")
+        text_str = "\n".join(text)
+        prompt = f"""请将以下对话历史压缩为一段简短摘要（30字以内），保留关键信息：已查询的条件、排序方向、文档范围等。
+
+{text_str}
+
+摘要："""
+        try:
+            response = self.llm.invoke(prompt)
+            summary = response.content.strip()
+            logger.info("历史压缩: %d 轮→摘要: %s", len(history) - self.SUMMARY_KEEP_RECENT, summary)
+            return summary
+        except Exception:
+            return ""
+
+    def _format_history(self, history: list | None, summary: str = "") -> str:
         """将历史问答格式化为可读文本（兼容 dict 和 HistoryItem）"""
         if not history:
             return ""
-        history = history[-self.MAX_HISTORY_TURNS:]
         lines = ["<历史对话>"]
-        for h in history:
+        if summary:
+            lines.append(f"  [对话摘要] {summary}")
+            lines.append("")
+            display = history[-self.SUMMARY_KEEP_RECENT:]
+        else:
+            display = history[-self.MAX_HISTORY_TURNS:]
+        for h in display:
             if isinstance(h, dict):
                 q = h.get("question", "")
                 a = h.get("answer", "")
@@ -267,9 +243,13 @@ class RAGEngine:
         lines.append("</历史对话>")
         return "\n".join(lines)
 
-    def _analyze_intent(self, question: str) -> tuple[bool, str]:
+    def _analyze_intent(self, question: str, history: list | None = None) -> tuple[bool, str]:
         """一次 LLM 调用同时判断是否需要检索和选块策略"""
-        prompt = INTENT_ANALYSIS_PROMPT.format(question=question)
+        last_question = ""
+        if history:
+            last = history[-1]
+            last_question = last.get("question", "") if isinstance(last, dict) else getattr(last, "question", "")
+        prompt = PromptManager.get("intent", "analysis").format(question=question, last_question=last_question)
         try:
             response = self.llm.invoke(prompt)
             parts = response.content.strip().split(",")
@@ -280,13 +260,13 @@ class RAGEngine:
             return True, "relevance"
 
 
-    def _rewrite_query(self, question: str, history: list[dict] | None) -> str:
+    def _rewrite_query(self, question: str, history: list[dict] | None, history_summary: str = "") -> str:
         """将问题改写为更利于检索的查询——无论有无历史都会改写"""
         if history:
-            history_text = self._format_history(history)
-            prompt = f"{REWRITE_WITH_HISTORY_PROMPT}\n\n对话历史：\n{history_text}\n\n最新问题：{question}\n\n改写后的查询："
+            history_text = self._format_history(history, history_summary)
+            prompt = PromptManager.get("rewrite", "with_history").format(history=history_text, question=question)
         else:
-            prompt = f"{REWRITE_SYSTEM_PROMPT}\n\n用户问题：{question}\n\n将以上问题扩展为完整的搜索查询，补充可能的文档标题关键词、学号、实验名称等。\n\n改写后的查询："
+            prompt = PromptManager.get("rewrite", "without_history").format(question=question)
         try:
             response = self.llm.invoke(prompt)
             rewritten = response.content.strip()
@@ -361,13 +341,7 @@ class RAGEngine:
             return None
         # 发前 5 个 chunk 的原始内容
         sample = "\n---\n".join(doc.page_content for doc, _ in chunks[:5])
-        prompt = (
-            f"以下是文档中的几条记录（key:value 格式）：\n{sample}\n\n"
-            f"问题：{question}\n"
-            f"请判断要加总求和的是哪个 key 对应的数值？\n"
-            f"注意：只能选择值为数字的 key（如'结果'、'金额'、'价格'等），不能选择文本类型的 key。\n"
-            f"只返回 key 名，不要其他内容。"
-        )
+        prompt = PromptManager.get("identify_key", "template").format(sample=sample, question=question)
         try:
             response = self.llm.invoke(prompt)
             key = response.content.strip().strip("'\"")
@@ -511,24 +485,28 @@ class RAGEngine:
 
     def answer(self, question: str, top_k: int = None, document_ids: list[int] | None = None,
                history: list[dict] | None = None, strategy: str = None):
-        """执行完整 RAG 流程：查询改写 → 意图判断 → 向量检索 → 构建 prompt → LLM 生成"""
+        """执行完整 RAG 流程：查询改写 → 聚合判断 → 意图分析 → 检索 → LLM 生成"""
         if top_k is None:
             top_k = self.DEFAULT_TOP_K
 
+        # 0. 预计算历史摘要（超过阈值时压缩较早轮次）
+        history_summary = self._summarize_history(history)
+
         # 1. 查询改写：模糊问题结合历史改写为自包含查询（必须先于 is_agg 判断）
-        search_query = self._rewrite_query(question, history)
+        search_query = self._rewrite_query(question, history, history_summary)
         logger.info("查询改写: 原始='%s' → 改写='%s'", question, search_query)
 
-        # 2. 用改写后的查询判断是否聚合查询
+        # 2. 用改写后的查询判断是否聚合查询（关键词规则，无需 LLM）
         is_agg = self._is_aggregation_query(search_query)
         logger.info("意图分析: is_agg=%s, search_query='%s'", is_agg, search_query[:80])
 
-        # 3. 意图判断 + 策略选择（非聚合查询才需要）
+        # 3. 非聚合查询才走 LLM 意图分析
         if not is_agg:
-            needs_rag, detected_strategy = self._analyze_intent(question)
+            needs_rag, detected_strategy = self._analyze_intent(question, history)
             if not needs_rag:
-                history_text = self._format_history(history)
-                messages = ChatPromptTemplate.from_template(DIRECT_ANSWER_PROMPT).format_messages(
+                logger.info("意图分析: 无需检索，直接回答")
+                history_text = self._format_history(history, history_summary)
+                messages = ChatPromptTemplate.from_template(PromptManager.get("direct_answer", "template")).format_messages(
                     question=question, history=history_text
                 )
                 response = self.llm.invoke(messages)
@@ -536,7 +514,7 @@ class RAGEngine:
             if strategy is None:
                 strategy = detected_strategy
 
-        # 2. 向量检索
+        # 4. 向量检索
         filter_expr = None
         if document_ids:
             filter_expr = {"document_id": {"$in": document_ids}}
@@ -724,7 +702,7 @@ class RAGEngine:
             context += agg_precomputed
 
         # 6. 构建 Prompt → 调 LLM
-        history_text = self._format_history(history)
+        history_text = self._format_history(history, history_summary)
         messages = self.prompt.format_messages(question=question, context=context, history=history_text)
         try:
             response = self.llm.invoke(messages)

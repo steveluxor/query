@@ -8,7 +8,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 
 import steveluxor.ragknowledgesystem.common.Result;
 
-import static steveluxor.ragknowledgesystem.common.Constants.SERVER_ERROR;
+import static steveluxor.ragknowledgesystem.common.Constants.*;
 
 @Slf4j
 @RestControllerAdvice
@@ -22,13 +22,13 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public Result<Void> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
         log.warn("参数类型错误: {}={}", e.getName(), e.getValue());
-        return Result.fail("参数格式错误");
+        return Result.fail(PARAM_FORMAT_ERROR);
     }
 
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public Result<Void> handleMissingParam(MissingServletRequestParameterException e) {
         log.warn("缺少参数: {}", e.getParameterName());
-        return Result.fail("缺少必要参数");
+        return Result.fail(MISSING_PARAM);
     }
 
     @ExceptionHandler(Exception.class)
