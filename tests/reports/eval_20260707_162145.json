@@ -1,0 +1,183 @@
+{
+  "timestamp": "20260707_162145",
+  "total": 9,
+  "passed": 8,
+  "failed": 1,
+  "pass_rate": 88.9,
+  "results": [
+    {
+      "id": "greeting_001",
+      "question": "你好",
+      "answer": "你好！有什么我可以帮你的吗？请随时提问。",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "greeting_002",
+      "question": "你是谁",
+      "answer": "你好！我是你的智能问答助手，可以帮你从知识库中检索信息并进行精确计算。有什么问题需要我帮忙吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_001",
+      "question": "账单里最贵的是什么",
+      "answer": "账单里最贵的是 **万代 PGU元祖**，最终成交价为 **1543元**（原价1620元，优惠77元）。",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "PGU元祖",
+        "1543"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_002",
+      "question": "账单里最便宜的是什么",
+      "answer": "账单里最便宜的是 **高高品牌的「HG蓝异端2L」**，原价27元，优惠25元后，最终只花了 **2元**！🎉",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "蓝异端",
+        "2元"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_003",
+      "question": "金额第三高的是哪条记录",
+      "answer": "金额（即实际支付金额\"结果\"列）第三高的记录是：\n\n**第96行 | 万代 MG德天使**\n- **原价**：402元\n- **优惠**：40元\n- **实际金额**：**362元**\n\n排名情况（前三）：\n1. **第1名**：PGU元祖（1543元）\n2. **第2名**：PG能天使（925元）\n3. **第3名**：**MG德天使（362元）** ← 就是这条记录",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "德天使",
+        "362"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "sum_001",
+      "question": "总共花了多少钱",
+      "answer": "根据账本记录，总共花了 **16,591.65 元**（共140条记录）。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "16,591.65"
+      ],
+      "kw_missing": [
+        "16591.65"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_001",
+      "question": "论文里说了什么",
+      "answer": "您好！请问您指的是哪篇论文？能告诉我论文的名称或主题吗？这样我才能帮您查找相关内容。",
+      "expected": "search",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": false
+    },
+    {
+      "id": "search_002",
+      "question": "有哪些品牌的商品",
+      "answer": "根据知识库中的\"账.xlsx\"文件，目前检索到的商品品牌只有 **万代（Bandai）** 这一个品牌，包含的商品有：\n\n| 品牌 | 部分商品举例 |\n|------|------------|\n| **万代** | RG全装备创制强袭、RG神、RG闪光高达、HG杰斯塔、HG杰斯塔加农、HG月高达、HG尊者、HG新生强人、HGGTO红扎古、HG创制燃焰、MG德天使、MG主天使、MG金恩等 |\n\n目前知识库中仅收录了**万代**品牌的商品数据，未发现其他品牌的信息。",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "23101311宋铁轶形策论文.docx",
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "万代"
+      ],
+      "kw_missing": [
+        "高高"
+      ],
+      "passed": true
+    },
+    {
+      "id": "content_filter_001",
+      "question": "万代的商品一共花了多少钱",
+      "answer": "万代品牌的商品一共花了 **13,599.62 元**（即\"结果\"列的总和，共76件商品）。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "23101311宋铁轶形策论文.docx",
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "13,599.62"
+      ],
+      "kw_missing": [
+        "13599.62"
+      ],
+      "passed": true
+    }
+  ],
+  "groups": {
+    "基础问候": {
+      "total": 2,
+      "passed": 2
+    },
+    "排名查询": {
+      "total": 3,
+      "passed": 3
+    },
+    "求和查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "文档搜索": {
+      "total": 2,
+      "passed": 1
+    },
+    "条件查询": {
+      "total": 1,
+      "passed": 1
+    }
+  }
+}

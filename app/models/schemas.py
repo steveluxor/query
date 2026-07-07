@@ -40,3 +40,4 @@ class AnswerResponse(BaseModel):
     answer: str
     sources: list[Source]
     is_agg: bool = False
+    tools_called: list[str] = []

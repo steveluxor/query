@@ -1,0 +1,125 @@
+{
+  "timestamp": "20260707_160424",
+  "total": 9,
+  "passed": 7,
+  "failed": 2,
+  "pass_rate": 77.8,
+  "results": [
+    {
+      "id": "greeting_001",
+      "question": "你好",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "greeting_002",
+      "question": "你是谁",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "rank_001",
+      "question": "账单里最贵的是什么",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "rank_002",
+      "question": "账单里最便宜的是什么",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "rank_003",
+      "question": "金额第三高的是哪条记录",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "sum_001",
+      "question": "总共花了多少钱",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "search_001",
+      "question": "论文里说了什么",
+      "expected": "search",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "passed": false
+    },
+    {
+      "id": "search_002",
+      "question": "有哪些品牌的商品",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": true
+    },
+    {
+      "id": "content_filter_001",
+      "question": "万代的商品一共花了多少钱",
+      "expected": "search_then_sum",
+      "actual": "search_then_rank",
+      "sources": [
+        "23101311宋铁轶形策论文.docx",
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "passed": false
+    }
+  ],
+  "groups": {
+    "基础问候": {
+      "total": 2,
+      "passed": 2
+    },
+    "排名查询": {
+      "total": 3,
+      "passed": 3
+    },
+    "求和查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "文档搜索": {
+      "total": 2,
+      "passed": 1
+    },
+    "条件查询": {
+      "total": 1,
+      "passed": 0
+    }
+  }
+}

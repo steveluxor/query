@@ -50,8 +50,9 @@ query/
 
 ### core/ - 核心业务层
 - `document_processor.py` - 文档处理器
-  - 支持格式: PDF、DOCX、TXT、MD
-  - `RecursiveCharacterTextSplitter` 切片 (500字符/100重叠)
+  - 支持格式: PDF、DOCX、TXT、MD、XLSX
+  - Excel 每行视为独立 chunk，不做文本切片
+  - `RecursiveCharacterTextSplitter` 切片 (1000字符/200重叠，非 Excel 文档)
   - 中文分隔符优先: `\n\n`, `\n`, `。`, `；`, `，`
 - `vector_store.py` - 向量数据库封装
   - Chroma + Ollama Embeddings (nomic-embed-text)

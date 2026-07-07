@@ -12,9 +12,14 @@ chroma_db/
 .env
 
 # Java
-java-backend/**/target/
-java-backend/*.iml
-java-backend/.mvn/
+java/**/target/
+java/*.iml
+java/.mvn/
+
+# Frontend
+frontend/logs/
+frontend/temp/
+frontend/nginx.exe
 
 # Logs
 *.log

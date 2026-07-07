@@ -1,0 +1,183 @@
+{
+  "timestamp": "20260707_163404",
+  "total": 9,
+  "passed": 8,
+  "failed": 1,
+  "pass_rate": 88.9,
+  "results": [
+    {
+      "id": "greeting_001",
+      "question": "你好",
+      "answer": "你好！有什么我可以帮你的吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "greeting_002",
+      "question": "你是谁",
+      "answer": "你好！我是你的智能问答助手，可以帮你从知识库中检索信息并进行精确计算。有什么问题需要我帮忙吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_001",
+      "question": "账单里最贵的是什么",
+      "answer": "账单里最贵的是 **万代 PGU元祖**，实际支付金额为 **1543元**（原价1620元，优惠了77元）。",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "PGU元祖",
+        "1543"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_002",
+      "question": "账单里最便宜的是什么",
+      "answer": "账单里最便宜的是 **高高品牌的「HG蓝异端2L」**，原价27元，优惠了25元，最终实际支付仅 **2元**！🎉",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "蓝异端",
+        "2元"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_003",
+      "question": "金额第三高的是哪条记录",
+      "answer": "金额（原价）第三高的记录是：\n\n**第96行 | 品牌：万代 | 产品名：MG德天使 | 原价：402元 | 优惠：40元 | 结果：362元**\n\n（注：原价第一高是PGU元祖1620元，第二高是PG能天使1025元，第三高就是MG德天使402元。）",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "德天使",
+        "362"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "sum_001",
+      "question": "总共花了多少钱",
+      "answer": "根据账本记录，总共花了 **16,591.65 元**。这是所有商品在扣除优惠后的实际支付金额总和，共记录了140笔消费。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "账.xlsx",
+        "23101311宋铁轶形策论文.docx",
+        "大学生创业计划书.docx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "16,591.65"
+      ],
+      "kw_missing": [
+        "16591.65"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_001",
+      "question": "论文里说了什么",
+      "answer": "您好！请问您想了解哪篇论文的内容？能告诉我论文的标题或具体主题吗？这样我可以帮您搜索相关知识库中的信息。",
+      "expected": "search",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": false
+    },
+    {
+      "id": "search_002",
+      "question": "有哪些品牌的商品",
+      "answer": "根据已检索到的数据，知识库中商品涉及的**品牌**如下：\n\n1. **高高** — 如 HG座天使2型、HG地球三、HG天王七等\n2. **万代** — 如 RG牛高达、RG海牛、HG尊者、RG沙扎比等（数量最多）\n3. **大班** — 如 武器包、HG89式喷射滑板、HG喷射滑板等\n4. **EW** — 如 RG重牛配件包、RG海牛超绝米加粒子加农炮、00Q剑四等\n\n目前共检索到 **4个品牌**：**高高、万代、大班、EW**。其中万代的商品数量最多，高高、大班和EW也有部分商品。",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "万代",
+        "高高"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "content_filter_001",
+      "question": "万代的商品一共花了多少钱",
+      "answer": "万代的商品一共花了 **13,599.62 元**。\n\n具体来说，账目中共有 **76件** 万代品牌的商品，每件商品的实际支付金额（原价减去优惠后的\"结果\"）加起来总共是 **13,599.62 元**。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "23101311宋铁轶形策论文.docx",
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "13,599.62"
+      ],
+      "kw_missing": [
+        "13599.62"
+      ],
+      "passed": true
+    }
+  ],
+  "groups": {
+    "基础问候": {
+      "total": 2,
+      "passed": 2
+    },
+    "排名查询": {
+      "total": 3,
+      "passed": 3
+    },
+    "求和查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "文档搜索": {
+      "total": 2,
+      "passed": 1
+    },
+    "条件查询": {
+      "total": 1,
+      "passed": 1
+    }
+  }
+}

@@ -1,0 +1,248 @@
+{
+  "timestamp": "20260707_164348",
+  "total": 11,
+  "passed": 10,
+  "failed": 1,
+  "pass_rate": 90.9,
+  "results": [
+    {
+      "id": "greeting_001",
+      "question": "你好",
+      "answer": "你好！有什么我可以帮你的吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "greeting_002",
+      "question": "你是谁",
+      "answer": "你好！我是你的智能问答助手，可以帮你从知识库中检索信息并进行精确计算。有什么问题需要我帮忙的吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_001",
+      "question": "账单里最贵的是什么",
+      "answer": "账单里最贵的是 **万代 PGU元祖**，原价为 **1620元**，优惠77元后实际支付 **1543元**。",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "PGU元祖",
+        "1543"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_002",
+      "question": "账单里最便宜的是什么",
+      "answer": "账单里最便宜的是 **高高品牌的「HG蓝异端2L」**，最终成交价仅 **2元**！\n\n它的原价是27元，优惠了25元，所以实际只花了2块钱，可以说是非常划算了！",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "蓝异端",
+        "2元"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_003",
+      "question": "金额第三高的是哪条记录",
+      "answer": "金额（原价）第三高的记录是：\n\n**万代 MG德天使**\n- **原价**：402元\n- **优惠**：40元\n- **结果**：362元\n- **行号**：96\n\n排名前两位的分别是：\n1. **PGU元祖**（原价1620元）\n2. **PG能天使**（原价1025元）\n\n所以第三高就是这款 **MG德天使**，原价402元。",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "德天使",
+        "362"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "sum_001",
+      "question": "总共花了多少钱",
+      "answer": "根据账本记录，你总共花了 **16,591.65 元**（共140件商品，均为优惠后的实际支付金额）。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "账.xlsx",
+        "23101311宋铁轶形策论文.docx",
+        "大学生创业计划书.docx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "16,591.65"
+      ],
+      "kw_missing": [
+        "16591.65"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_001",
+      "question": "论文里说了什么",
+      "answer": "您好！请问您指的是哪篇论文？能告诉我论文的标题或具体内容吗？这样我才能帮您从知识库中查找相关信息。",
+      "expected": "search",
+      "actual": "none",
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": false
+    },
+    {
+      "id": "search_002",
+      "question": "有哪些品牌的商品",
+      "answer": "根据知识库中的数据，目前记录的商品品牌有以下几种：\n\n1. **万代**（Bandai）— 数量最多，如RG牛高达、RG沙扎比、HG尊者等\n2. **高高** — 如HG座天使2型、HG地球三、HG天王七等\n3. **大班** — 如武器包、HG89式喷射滑板、HG喷射滑板等\n4. **EW** — 如RG重牛配件包、RG海牛超绝米加粒子加农炮、00Q剑四等\n\n目前共记录了 **4个品牌** 的商品。",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "万代",
+        "高高",
+        "大班",
+        "EW"
+      ],
+      "kw_missing": [
+        "和模线",
+        "星动",
+        "唯美",
+        "钢铁模型",
+        "幻影",
+        "集模社",
+        "星锋社",
+        "星峰社",
+        "XX",
+        "对决",
+        "KK",
+        "长龙",
+        "萌闪",
+        "昆仑",
+        "三叉戟",
+        "XW",
+        "聚匠",
+        "酋长大陆",
+        "爆爆",
+        "青舟",
+        "加勒比",
+        "Kosmos"
+      ],
+      "passed": true
+    },
+    {
+      "id": "content_filter_001",
+      "question": "万代的商品一共花了多少钱",
+      "answer": "万代的商品一共花了 **13,599.62 元**（即所有万代商品\"结果\"列的总和，共76条记录）。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "sources": [
+        "账.xlsx",
+        "23101311宋铁轶形策论文.docx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "13,599.62"
+      ],
+      "kw_missing": [
+        "13599.62"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_003",
+      "question": "全部列出来，所有品牌有哪些",
+      "answer": "好的！根据文档中的数据，所有品牌及其包含的产品如下：\n\n---\n\n### 🏷️ 所有品牌列表\n\n| 品牌 | 产品数量 |\n|------|:--------:|\n| **万代** | 最多（约60+款） |\n| **高高** | 10款 |\n| **大班** | 6款 |\n| **EW** | 3款 |\n| **集模社** | 6款 |\n| **和模线** | 4款 |\n| **星动** | 3款 |\n| **钢铁模型** | 3款 |\n| **酋长大陆** | 3款 |\n| **幻影** | 2款 |\n| **唯美** | 2款 |\n| **对决** | 2款 |\n| **长龙** | 2款 |\n| **星锋社/星峰社** | 2款 |\n| **Kosmos** | 1款 |\n| **XX** | 1款 |\n| **KK** | 1款 |\n| **萌闪** | 1款 |\n| **昆仑** | 1款 |\n| **三叉戟** | 1款 |\n| **XW** | 1款 |\n| **聚匠** | 1款 |\n| **爆爆** | 1款 |\n| **青舟** | 1款 |\n| **加勒比** | 1款 |\n| **星锋社** | 1款 |\n\n---\n\n**完整品牌清单（共26个品牌）：**\n1. **万代** - 如 RG牛高达、RG沙扎比、PGU元祖等\n2. **高高** - 如 HG座天使、HG天王七、HG火星四等\n3. **大班** - 如 武器包、MG红异端改、MG强袭自由等\n4. **EW** - 如 RG重牛配件包、00Q剑四、巨神装备等\n5. **集模社** - 如 HG战骑、HG瞬变、HG吉莱等\n6. **和模线** - 如 雷神、塔斯提尔、孤影、巴奇\n7. **星动** - 如 HG飞翼、HG风灵、HG风灵刻痕6\n8. **钢铁模型** - 如 MG钢坦克、MG卡铁球、MG铁球K型\n9. **酋长大陆** - 如 雄鹿、迅捷异人、弗朗兹阿尔法\n10. **幻影** - 如 MG米娅扎古、MGGNX厄运式\n11. **唯美** - 如 HG君王异端、HG吉乌魔灵\n12. **对决** - HGGTO扎古半加农（2个）\n13. **长龙** - 5501RG元祖基地限定版、5504RG福冈牛\n14. **星锋社** - HG斯巴达吉姆、HG温达姆配件包\n15. **Kosmos** - PG能天使灯组\n16. **XX** - HG阿诺魔灵\n17. **KK** - HG陆战\n18. **萌闪** - HG特洛八\n19. **昆仑** - FM风灵\n20. **三叉戟** - HG海因德里\n21. **XW** - HG亚希玛南瓜饼\n22. **聚匠** - HG柯西\n23. **爆爆** - HG轻吉莱\n24. **青舟** - 大毒蛇\n25. **加勒比** - RG海盗x2\n26. **星峰社** - HGTR6白伍德渥特\n\n以上就是账目中出现的所有品牌！",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "大班",
+        "Kosmos",
+        "高高"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "count_001",
+      "question": "账单里总共有多少条记录",
+      "answer": "根据检索到的数据，账单中的记录从**行号2**到**行号141**，每条记录对应一个产品。所以总共有 **140条记录**。",
+      "expected": "search",
+      "actual": "search",
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "140"
+      ],
+      "kw_missing": [],
+      "passed": true
+    }
+  ],
+  "groups": {
+    "基础问候": {
+      "total": 2,
+      "passed": 2
+    },
+    "排名查询": {
+      "total": 3,
+      "passed": 3
+    },
+    "求和查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "文档搜索": {
+      "total": 3,
+      "passed": 2
+    },
+    "条件查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "计数查询": {
+      "total": 1,
+      "passed": 1
+    }
+  }
+}

@@ -1,0 +1,38 @@
+RAG 评测报告 (20260707_160615)
+==================================================
+总题数: 9  通过: 8  失败: 1  通过率: 88.9%
+
+[PASS] greeting_001: 你好
+      期望=none 实际=none 来源=[]
+
+[PASS] greeting_002: 你是谁
+      期望=none 实际=none 来源=[]
+
+[PASS] rank_001: 账单里最贵的是什么
+      期望=search_then_rank 实际=search_then_rank 来源=['账.xlsx']
+
+[PASS] rank_002: 账单里最便宜的是什么
+      期望=search_then_rank 实际=search_then_rank 来源=['账.xlsx']
+
+[PASS] rank_003: 金额第三高的是哪条记录
+      期望=search_then_rank 实际=search_then_rank 来源=['账.xlsx']
+
+[PASS] sum_001: 总共花了多少钱
+      期望=search_then_sum 实际=search_then_sum 来源=['账.xlsx']
+
+[FAIL] search_001: 论文里说了什么
+      期望=search 实际=none 来源=[]
+
+[PASS] search_002: 有哪些品牌的商品
+      期望=search 实际=search 来源=['账.xlsx']
+
+[PASS] content_filter_001: 万代的商品一共花了多少钱
+      期望=search_then_sum 实际=search_then_sum 来源=['账.xlsx']
+
+==================================================
+按类别:
+  基础问候: 2/2
+  排名查询: 3/3
+  求和查询: 1/1
+  文档搜索: 1/2
+  条件查询: 1/1

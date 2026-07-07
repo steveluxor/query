@@ -28,4 +28,5 @@ async def ask_question(
         answer=result["answer"],
         sources=result["sources"],
         is_agg=result.get("is_agg", False),
+        tools_called=result.get("tools_called", []),
     )

@@ -1,0 +1,96 @@
+[
+    {
+        "id": "greeting_001",
+        "group": "基础问候",
+        "question": "你好",
+        "expected_tool_type": "none",
+        "tags": ["greeting", "no_tool"]
+    },
+    {
+        "id": "greeting_002",
+        "group": "基础问候",
+        "question": "你是谁",
+        "expected_tool_type": "none",
+        "tags": ["greeting", "no_tool"]
+    },
+    {
+        "id": "rank_001",
+        "group": "排名查询",
+        "question": "账单里最贵的是什么",
+        "expected_tool_type": "search_then_rank",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["PGU元祖", "1543"],
+        "tags": ["rank", "aggregation"]
+    },
+    {
+        "id": "rank_002",
+        "group": "排名查询",
+        "question": "账单里最便宜的是什么",
+        "expected_tool_type": "search_then_rank",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["蓝异端", "2元"],
+        "tags": ["rank", "aggregation"]
+    },
+    {
+        "id": "rank_003",
+        "group": "排名查询",
+        "question": "金额第三高的是哪条记录",
+        "expected_tool_type": "search_then_rank",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["德天使", "362"],
+        "tags": ["rank", "aggregation"]
+    },
+    {
+        "id": "sum_001",
+        "group": "求和查询",
+        "question": "总共花了多少钱",
+        "expected_tool_type": "search_then_sum",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["16591.65", "16,591.65"],
+        "tags": ["sum", "aggregation"]
+    },
+    {
+        "id": "search_001",
+        "group": "文档搜索",
+        "question": "论文里说了什么",
+        "expected_tool_type": "search",
+        "expected_sources_contain": ["论文"],
+        "tags": ["search"]
+    },
+    {
+        "id": "search_002",
+        "group": "文档搜索",
+        "question": "有哪些品牌的商品",
+        "expected_tool_type": "search_then_read_all",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["万代", "高高", "大班", "EW", "和模线", "星动", "唯美", "钢铁模型", "幻影", "集模社", "星锋社", "星峰社", "XX", "对决", "KK", "长龙", "萌闪", "昆仑", "三叉戟", "XW", "聚匠", "酋长大陆", "爆爆", "青舟", "加勒比", "Kosmos"],
+        "tags": ["search", "read_all_rows"]
+    },
+    {
+        "id": "content_filter_001",
+        "group": "条件查询",
+        "question": "万代的商品一共花了多少钱",
+        "expected_tool_type": "search_then_sum",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["13599.62", "13,599.62"],
+        "tags": ["sum", "content_filter"]
+    },
+    {
+        "id": "search_003",
+        "group": "文档搜索",
+        "question": "全部列出来，所有品牌有哪些",
+        "expected_tool_type": "search_then_read_all",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["大班", "Kosmos", "高高"],
+        "tags": ["search", "read_all_rows"]
+    },
+    {
+        "id": "count_001",
+        "group": "计数查询",
+        "question": "账单里总共有多少条记录",
+        "expected_tool_type": "search_then_read_all",
+        "expected_sources_contain": ["账"],
+        "expected_answer_contains": ["140"],
+        "tags": ["count", "read_all_rows"]
+    }
+]
