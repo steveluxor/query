@@ -117,6 +117,8 @@ services:
       EMBEDDING_MODEL_NAME: nomic-embed-text
       EMBEDDING_DEVICE: cpu
       VECTOR_STORE_PATH: /app/chroma_db
+      REDIS_HOST: redis
+      REDIS_PASSWORD: sty01725
     volumes:
       - chroma-data:/app/chroma_db
       - temp-files:/tmp/rag_temp
@@ -159,7 +161,7 @@ services:
 
   java-backend:
     build:
-      context: ./java-backend
+      context: ./java
       dockerfile: Dockerfile
     container_name: rag-java-backend
     ports:
