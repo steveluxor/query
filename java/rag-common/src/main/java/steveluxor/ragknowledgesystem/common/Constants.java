@@ -50,6 +50,11 @@ public class Constants {
     public static final String QA_CACHE_PREFIX = "qa:cache:";
     public static final Long QA_CACHE_TTL = 30L; // 分钟
 
+    // Redis 持久化记忆（Python AgentMemory 快照 + 对话历史缓存，3天 TTL）
+    public static final String QA_MEMORY_PREFIX = "qa:memory:";
+    public static final String QA_HISTORY_PREFIX = "qa:history:";
+    public static final Long QA_MEMORY_TTL_SECONDS = 259200L; // 3天
+
     // Redis 接口限流（ZSET 滑动窗口，key 格式 rate:{userId}）
     public static final String RATE_LIMIT_PREFIX = "rate:";
     public static final Long RATE_LIMIT_MAX = 30L; // 每分钟最大请求数

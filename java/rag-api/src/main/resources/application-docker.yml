@@ -6,6 +6,7 @@ spring:
     host: rabbitmq
   datasource:
     url: jdbc:mysql://mysql:3306/rag_knowledge?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    driver-class-name: com.mysql.cj.jdbc.Driver
 
 minio:
   endpoint: http://minio:9000
