@@ -28,6 +28,7 @@ dependencies = [
     # RabbitMQ & MinIO
     "pika>=1.3",
     "minio>=7.0",
+    "redis>=5.0",
 ]
 
 [tool.setuptools.packages.find]

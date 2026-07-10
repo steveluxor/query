@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # Java 后端
     java_base_url: str = "http://localhost:8085"
 
+    # Redis
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
+    redis_db: int = 0
+    redis_history_key_prefix: str = "qa:history:"
+    redis_memory_key_prefix: str = "qa:memory:"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

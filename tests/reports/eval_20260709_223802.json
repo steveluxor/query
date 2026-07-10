@@ -1,0 +1,287 @@
+{
+  "timestamp": "20260709_223802",
+  "total": 11,
+  "passed": 10,
+  "failed": 1,
+  "pass_rate": 90.9,
+  "results": [
+    {
+      "id": "greeting_001",
+      "question": "你好",
+      "answer": "你好！有什么我可以帮你的吗？😊",
+      "expected": "none",
+      "actual": "none",
+      "tools_called": [],
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "greeting_002",
+      "question": "你是谁",
+      "answer": "你好！我是你的智能问答助手，可以帮你从知识库中检索信息并进行精确计算。有什么问题尽管问我吧！😊",
+      "expected": "none",
+      "actual": "none",
+      "tools_called": [],
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_001",
+      "question": "账单里最贵的是什么",
+      "answer": "账单里最贵的是 **万代 PGU元祖**，实际支付金额为 **1543元**（原价1620元，优惠了77元）。",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows",
+        "calculate_rank"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "PGU元祖",
+        "1543"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_002",
+      "question": "账单里最便宜的是什么",
+      "answer": "账单里最便宜的是 **高高品牌的「HG蓝异端2L」**，原价27元，优惠了25元，最终实付仅 **2元**！🎉",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows",
+        "calculate_rank"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "蓝异端",
+        "2元"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "rank_003",
+      "question": "金额第三高的是哪条记录",
+      "answer": "金额第三高的记录是：\n\n**行号96** | **万代** | **MG德天使**\n- **原价**：402元\n- **优惠**：40元\n- **结果（实付）**：**362元**\n\n排名情况：\n1. **第1名**：行号81 - PGU元祖（结果：1543元）\n2. **第2名**：行号86 - PG能天使（结果：925元）\n3. **第3名**：行号96 - **MG德天使（结果：362元）** ✅",
+      "expected": "search_then_rank",
+      "actual": "search_then_rank",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows",
+        "calculate_rank"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "德天使",
+        "362"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "sum_001",
+      "question": "总共花了多少钱",
+      "answer": "根据账本数据，总共花了 **16,591.65 元**（共140条记录，均为优惠后的实际支付金额）。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows",
+        "calculate_sum"
+      ],
+      "sources": [
+        "账.xlsx",
+        "23101311宋铁轶形策论文.docx",
+        "大学生创业计划书.docx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "16,591.65"
+      ],
+      "kw_missing": [
+        "16591.65"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_001",
+      "question": "论文里说了什么",
+      "answer": "您好！请问您想了解哪篇论文的内容？请提供论文的标题或相关关键词，我来帮您搜索知识库中的信息。",
+      "expected": "search",
+      "actual": "none",
+      "tools_called": [],
+      "sources": [],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [],
+      "kw_missing": [],
+      "passed": false
+    },
+    {
+      "id": "search_002",
+      "question": "有哪些品牌的商品",
+      "answer": "根据知识库中的数据，以下是所有出现的品牌：\n\n1. **高高**\n2. **万代**\n3. **大班**\n4. **EW**\n5. **和模线**\n6. **星动**\n7. **唯美**\n8. **钢铁模型**\n9. **幻影**\n10. **集模社**\n11. **星锋社**\n12. **Kosmos**\n13. **XX**\n14. **对决**\n15. **KK**\n16. **长龙**\n17. **萌闪**\n18. **昆仑**\n19. **三叉戟**\n20. **XW**\n21. **聚匠**\n22. **酋长大陆**\n23. **爆爆**\n24. **青舟**\n25. **加勒比**\n26. **星峰社**\n\n共 **26个品牌**。其中**万代**的商品数量最多，其他品牌如高高、大班、EW、和模线等也有多款商品。",
+      "expected": "search_then_read_all",
+      "actual": "search_then_read_all",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "万代",
+        "高高",
+        "大班",
+        "EW",
+        "和模线",
+        "星动",
+        "唯美",
+        "钢铁模型",
+        "幻影",
+        "集模社",
+        "星锋社",
+        "星峰社",
+        "XX",
+        "对决",
+        "KK",
+        "长龙",
+        "萌闪",
+        "昆仑",
+        "三叉戟",
+        "XW",
+        "聚匠",
+        "酋长大陆",
+        "爆爆",
+        "青舟",
+        "加勒比",
+        "Kosmos"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "content_filter_001",
+      "question": "万代的商品一共花了多少钱",
+      "answer": "万代的商品一共花了 **13,599.62 元**。\n\n这是账表中所有品牌为\"万代\"的76件商品，在扣除优惠后的实际支付金额总和。",
+      "expected": "search_then_sum",
+      "actual": "search_then_sum",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows",
+        "calculate_sum"
+      ],
+      "sources": [
+        "23101311宋铁轶形策论文.docx",
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "13,599.62"
+      ],
+      "kw_missing": [
+        "13599.62"
+      ],
+      "passed": true
+    },
+    {
+      "id": "search_003",
+      "question": "全部列出来，所有品牌有哪些",
+      "answer": "根据完整数据，我来整理所有出现的品牌：\n\n以下是该账本中出现的所有品牌（按出现顺序整理）：\n\n1. **高高**\n2. **万代**\n3. **大班**\n4. **EW**\n5. **和模线**\n6. **星动**\n7. **唯美**\n8. **钢铁模型**\n9. **幻影**\n10. **集模社**\n11. **星锋社**\n12. **Kosmos**\n13. **XX**\n14. **对决**\n15. **KK**\n16. **长龙**\n17. **萌闪**\n18. **昆仑**\n19. **三叉戟**\n20. **XW**\n21. **聚匠**\n22. **酋长大陆**\n23. **爆爆**\n24. **青舟**\n25. **加勒比**\n26. **星峰社**\n\n共 **26个品牌**。",
+      "expected": "search_then_read_all",
+      "actual": "search_then_read_all",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "大班",
+        "Kosmos",
+        "高高"
+      ],
+      "kw_missing": [],
+      "passed": true
+    },
+    {
+      "id": "count_001",
+      "question": "账单里总共有多少条记录",
+      "answer": "从数据来看，账单的记录从**行号2**开始到**行号141**结束，共 **140条记录**（2到141共140行）。不过让我确认一下，行号1通常是表头，所以实际数据行是行号2~141。\n\n账单中总共有 **140条记录**。",
+      "expected": "search_then_read_all",
+      "actual": "search_then_read_all",
+      "tools_called": [
+        "search_documents",
+        "read_all_rows"
+      ],
+      "sources": [
+        "账.xlsx"
+      ],
+      "has_error": false,
+      "answer_ok": true,
+      "kw_matched": [
+        "140"
+      ],
+      "kw_missing": [],
+      "passed": true
+    }
+  ],
+  "groups": {
+    "基础问候": {
+      "total": 2,
+      "passed": 2
+    },
+    "排名查询": {
+      "total": 3,
+      "passed": 3
+    },
+    "求和查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "文档搜索": {
+      "total": 3,
+      "passed": 2
+    },
+    "条件查询": {
+      "total": 1,
+      "passed": 1
+    },
+    "计数查询": {
+      "total": 1,
+      "passed": 1
+    }
+  }
+}

@@ -126,6 +126,10 @@ public class QaServiceImpl implements QaService {
 
                 if (!Boolean.TRUE.equals(memoryExists)) {
                     // Redis 无记忆快照，发送全量历史供 Python 重建 AgentMemory
+                    QaSession session = qaSessionMapper.selectById(request.getSessionId());
+                    if (session != null && session.getPreferences() != null) {
+                        pythonReq.put("preferences", objectMapper.readValue(session.getPreferences(), Map.class));
+                    }
                     List<QaHistory> allHistory = qaHistoryMapper.selectBySessionId(request.getSessionId(), userId);
                     if (!allHistory.isEmpty()) {
                         List<Map<String, Object>> historyList = allHistory.stream()
@@ -179,6 +183,28 @@ public class QaServiceImpl implements QaService {
                     String memoryKey = QA_MEMORY_PREFIX + sessionIdStr;
                     redisTemplate.opsForValue().set(memoryKey, memoryJson, QA_MEMORY_TTL_SECONDS, TimeUnit.SECONDS);
                     log.info("AgentMemory 写入 Redis: sessionId={}", sessionIdStr);
+
+                    // 4a-1. preferences 有变化时写入数据库
+                    try {
+                        Map<String, Object> memMap = (Map<String, Object>) memoryData;
+                        Object prefDirtyObj = memMap.get("preferences_dirty");
+                        // 兼容 Boolean / Integer / String 等类型
+                        boolean prefDirty = prefDirtyObj instanceof Boolean
+                                ? (Boolean) prefDirtyObj
+                                : prefDirtyObj instanceof Number
+                                ? ((Number) prefDirtyObj).intValue() != 0
+                                : Boolean.parseBoolean(String.valueOf(prefDirtyObj));
+                        if (prefDirty) {
+                            Object prefs = memMap.get("preferences");
+                            if (prefs != null) {
+                                String prefsJson = objectMapper.writeValueAsString(prefs);
+                                qaSessionMapper.updatePreferences(request.getSessionId(), prefsJson);
+                                log.info("preferences 写入数据库: sessionId={}", sessionIdStr);
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("memory_data 结构异常，跳过 preferences 写库: {}", e.getMessage());
+                    }
                 }
 
                 // 4b. 写入对话历史缓存（RPUSH，Python 用 lrange key -N -1 读取最新 N 条）

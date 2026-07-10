@@ -26,7 +26,9 @@ class QuestionRequest(BaseModel):
     document_ids: list[int] | None = None
     top_k: int = 5
     history: list[HistoryItem] | None = None
+    session_id: str | None = None
     strategy: str | None = None  # relevance / diversity / None(自动判断)
+    preferences: dict | None = None  # Java 从数据库传来的已存储偏好
 
 
 class Source(BaseModel):
@@ -41,3 +43,5 @@ class AnswerResponse(BaseModel):
     sources: list[Source]
     is_agg: bool = False
     tools_called: list[str] = []
+    session_id: str | None = None
+    memory_data: dict | None = None

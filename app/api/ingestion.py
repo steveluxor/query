@@ -2,12 +2,13 @@ import os
 import tempfile
 
 import minio
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from app.config import settings
 from app.core.document_processor import DocumentProcessor
 from app.core.vector_store import VectorStore
 from app.models.schemas import IngestRequest, IngestResponse
+from app.exceptions import BizException, ErrorCode
 
 
 def get_vector_store(request: Request) -> VectorStore:
@@ -59,9 +60,9 @@ async def ingest_document(
             file_name=request.file_name,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise BizException(ErrorCode.PARAM_ERROR, str(e))
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="文件未找到")
+        raise BizException(ErrorCode.NOT_FOUND, "文件未找到")
     finally:
         # 清理临时文件（共享目录或本地下载的）
         if need_cleanup and os.path.exists(file_path):

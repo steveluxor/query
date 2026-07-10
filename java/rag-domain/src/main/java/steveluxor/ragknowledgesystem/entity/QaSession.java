@@ -16,4 +16,5 @@ public class QaSession extends BaseEntity {
     private Long id;
     private Long userId;
     private String title;
+    private String preferences;  // JSON 字符串，存储用户偏好
 }

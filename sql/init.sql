@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS qa_session (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     user_id BIGINT NOT NULL,
     title VARCHAR(200) COMMENT '会话标题（取第一条问题）',
+    preferences JSON DEFAULT NULL COMMENT '用户偏好（JSON），由 Python AgentMemory 提取后回写',
     create_time DATETIME,
     update_time DATETIME,
     create_user BIGINT,

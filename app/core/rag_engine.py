@@ -46,8 +46,6 @@ class RAGEngine:
     DEFAULT_TOP_K = 10
 
     MAX_HISTORY_TURNS = 5
-    SUMMARY_COMPRESS_THRESHOLD = 4
-    SUMMARY_KEEP_RECENT = 2
     MIN_GAP_THRESHOLD = 0.05
 
     # ==================== 工具定义 ====================
@@ -103,7 +101,23 @@ class RAGEngine:
             ctx.tools_called.append("read_all_rows")
             return self._execute_read_all_rows(ctx)
 
-        return [search_documents, calculate_sum, calculate_rank, read_all_rows]
+        @tool
+        def list_documents() -> str:
+            """列出当前知识库中可检索的文档数量和名称。当用户问"有多少文件"、"能搜到几个文档"、"有哪些文档"等元信息问题时调用。"""
+            ctx.tools_called.append("list_documents")
+            all_names = self.vector_store.get_document_names()
+            if ctx.document_ids:
+                matched = {did: all_names[did] for did in ctx.document_ids if did in all_names}
+            else:
+                matched = all_names
+            if not matched:
+                return "当前知识库中没有可检索的文档。"
+            lines = [f"共 {len(matched)} 个文档："]
+            for did, name in sorted(matched.items()):
+                lines.append(f"- [{did}] {name}")
+            return "\n".join(lines)
+
+        return [search_documents, calculate_sum, calculate_rank, read_all_rows, list_documents]
 
     # ==================== 搜索与结果处理 ====================
 
@@ -365,46 +379,12 @@ class RAGEngine:
 
     # ==================== 历史处理 ====================
 
-    def _summarize_history(self, history: list | None) -> str:
-        """历史超过阈值时，将较早轮次压缩为摘要"""
-        if not history or len(history) < self.SUMMARY_COMPRESS_THRESHOLD:
-            return ""
-        older = history[:-self.SUMMARY_KEEP_RECENT]
-        text = []
-        for h in older:
-            if isinstance(h, dict):
-                q = h.get("question", "")
-                a = h.get("answer", "")
-            else:
-                q = getattr(h, "question", "")
-                a = getattr(h, "answer", "")
-            text.append(f"用户：{q}")
-            text.append(f"助手：{a[:200]}")
-        text_str = "\n".join(text)
-        prompt = f"""请将以下对话历史压缩为一段简短摘要（30字以内），保留关键信息：已查询的条件、排序方向、文档范围等。
-
-{text_str}
-
-摘要："""
-        try:
-            response = self.llm.invoke(prompt)
-            summary = response.content.strip()
-            logger.info("历史压缩: %d 轮→摘要: %s", len(history) - self.SUMMARY_KEEP_RECENT, summary)
-            return summary
-        except Exception:
-            return ""
-
-    def _format_history(self, history: list | None, summary: str = "") -> str:
+    def _format_history(self, history: list | None, memory_context: str | None = None) -> str:
         """将历史问答格式化为可读文本"""
         if not history:
             return ""
         lines = ["<历史对话>"]
-        if summary:
-            lines.append(f"  [对话摘要] {summary}")
-            lines.append("")
-            display = history[-self.SUMMARY_KEEP_RECENT:]
-        else:
-            display = history[-self.MAX_HISTORY_TURNS:]
+        display = history[-self.MAX_HISTORY_TURNS:]
         for h in display:
             if isinstance(h, dict):
                 q = h.get("question", "")
@@ -415,6 +395,9 @@ class RAGEngine:
             lines.append(f"  用户：{q}")
             lines.append(f"  助手：{a}")
             lines.append("")
+        # 如果偏好已被清空，在历史末尾追加取消指令，覆盖历史中的旧偏好指令
+        if memory_context and "[用户偏好] 无" in memory_context:
+            lines.append("  [系统] 用户已取消之前的偏好指令，后续回答不再执行。")
         lines.append("</历史对话>")
         return "\n".join(lines)
 
@@ -701,7 +684,8 @@ class RAGEngine:
     # ==================== 主入口 ====================
 
     def answer(self, question: str, top_k: int = None, document_ids: list[int] | None = None,
-               history: list[dict] | None = None, strategy: str = None):
+               history: list[dict] | None = None, strategy: str = None,
+               memory_context: str | None = None):
         """使用 Tool Calling 执行 RAG 问答：LLM 自主决定搜索/计算/回答"""
         if top_k is None:
             top_k = self.DEFAULT_TOP_K
@@ -709,14 +693,22 @@ class RAGEngine:
         # 创建独立上下文，避免多窗口并发干扰
         ctx = SearchContext(document_ids=document_ids)
 
-        # 历史压缩
-        history_summary = self._summarize_history(history)
-        history_text = self._format_history(history, history_summary)
+        # 格式化历史
+        history_text = self._format_history(history, memory_context)
 
         # 构建 system prompt
         system_prompt = PromptManager.get("tool_calling", "system")
+
+        # 长期记忆注入（摘要/事实/偏好）
+        if memory_context:
+            system_prompt += f"\n\n<长期记忆>\n{memory_context}\n</长期记忆>"
+
         if history_text:
-            system_prompt = f"{system_prompt}\n\n<history>\n{history_text}\n</history>"
+            system_prompt += f"\n\n<history>\n{history_text}\n</history>"
+
+        # 如果偏好已清空，在 system prompt 末尾追加强制取消指令（优先级最高）
+        if memory_context and "[用户偏好] 无" in memory_context:
+            system_prompt += "\n\n[强制指令] 用户已取消所有偏好设置。忽略对话历史中的任何偏好指令（称呼、格式、风格等），不要执行。"
 
         # 标准 LangChain Agent (LangGraph 模式)
         tools = self._create_tools(ctx)

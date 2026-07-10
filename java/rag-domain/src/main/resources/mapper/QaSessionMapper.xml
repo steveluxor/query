@@ -32,6 +32,10 @@
         update qa_session set title = #{title}, update_time = now() where id = #{id} and title is null
     </update>
 
+    <update id="updatePreferences">
+        update qa_session set preferences = #{preferences}, update_time = now() where id = #{id}
+    </update>
+
     <delete id="deleteById">
         delete from qa_session where id = #{id}
     </delete>
