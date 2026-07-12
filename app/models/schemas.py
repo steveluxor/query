@@ -45,3 +45,5 @@ class AnswerResponse(BaseModel):
     tools_called: list[str] = []
     session_id: str | None = None
     memory_data: dict | None = None
+    reflection_count: int = 0
+    plan: list[str] | None = None

@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -681,6 +682,91 @@ class RAGEngine:
 
         return "以下是完整数据：\n\n" + "\n\n".join(rows) + "\n\n以上为该文档全部数据。"
 
+    # ==================== 反思 ====================
+
+    def _reflect(self, question: str, answer_text: str, sources: list[dict]) -> dict:
+        """评估答案质量，返回 {"verdict": "ok"} 或 {"verdict": "revise", "feedback": "..."}"""
+        llm = ChatOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model_name,
+            temperature=0,
+        )
+        sources_text = "\n".join(
+            f"- [{s.get('file_name', '')}] {s.get('content', '')[:200]}"
+            for s in sources[:5]
+        )
+        prompt = PromptManager.get("reflection", "evaluate").format(
+            question=question, sources=sources_text, answer=answer_text,
+        )
+        try:
+            result = llm.invoke([("human", prompt)])
+            return json.loads(result.content)
+        except Exception:
+            return {"verdict": "ok"}
+
+    # ==================== Plan-and-Execute ====================
+
+    def _plan(self, question: str, memory_context: str | None = None) -> list[str]:
+        """生成执行计划，简单问题返回空列表"""
+        llm = ChatOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model_name,
+            temperature=0,
+        )
+        prompt = PromptManager.get("planner", "system")
+        if memory_context:
+            prompt += f"\n\n长期记忆：{memory_context}"
+        prompt += f"\n\n用户问题：{question}"
+
+        try:
+            result = llm.invoke([("human", prompt)])
+            plan = json.loads(result.content)
+            return plan if isinstance(plan, list) else []
+        except Exception:
+            return []
+
+    def _execute_step(self, step: str, ctx: SearchContext) -> str:
+        """执行单个步骤，复用现有工具"""
+        llm = ChatOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model_name,
+            temperature=0,
+            max_tokens=4096,
+        )
+        tools = self._create_tools(ctx)
+        agent = create_agent(
+            model=llm,
+            tools=tools,
+            system_prompt="你是一个执行器。根据步骤描述，调用工具完成任务。只返回工具结果，不要总结。",
+        )
+        try:
+            result = agent.invoke({"messages": [("human", step)]}, config={"recursion_limit": 10})
+            return result["messages"][-1].content
+        except Exception as e:
+            logger.warning("步骤执行失败: %s", e)
+            return f"执行失败: {e}"
+
+    def _replan(self, question: str, plan: list[str], step_index: int, step_result: str) -> dict:
+        """根据执行结果调整计划"""
+        llm = ChatOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model_name,
+            temperature=0,
+        )
+        results_summary = f"步骤{step_index + 1}({plan[step_index]})结果：{step_result[:200]}"
+        prompt = PromptManager.get("replanner", "system").format(
+            question=question, plan=plan, results=results_summary,
+        )
+        try:
+            result = llm.invoke([("human", prompt)])
+            return json.loads(result.content)
+        except Exception:
+            return {"action": "continue"}
+
     # ==================== 主入口 ====================
 
     def answer(self, question: str, top_k: int = None, document_ids: list[int] | None = None,
@@ -712,22 +798,89 @@ class RAGEngine:
 
         # 标准 LangChain Agent (LangGraph 模式)
         tools = self._create_tools(ctx)
-        agent = create_agent(
-            model=self.llm,
-            tools=tools,
-            system_prompt=system_prompt,
-        )
+
+        # 生成计划（规划模式）
+        plan = self._plan(question, memory_context) if settings.planning_enabled else []
 
         try:
-            result = agent.invoke(
-                {"messages": [("human", question)]},
-                config={"recursion_limit": 30},
-            )
+            if not plan:
+                # 简单问题或规划关闭，走原有流程
+                agent = create_agent(
+                    model=self.llm,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                )
+                result = agent.invoke(
+                    {"messages": [("human", question)]},
+                    config={"recursion_limit": 30},
+                )
+                answer_text = result["messages"][-1].content
+            else:
+                # 复杂问题，走规划流程
+                logger.info("执行计划: %s", plan)
+                step_results = []
+                current_plan = list(plan)
+
+                for i, step in enumerate(current_plan):
+                    step_result = self._execute_step(step, ctx)
+                    step_results.append({"step": step, "result": step_result})
+                    logger.info("步骤 %d/%d 完成: %s", i + 1, len(current_plan), step[:50])
+
+                    # 每步后重新规划
+                    replan = self._replan(question, current_plan, i, step_result)
+                    action = replan.get("action", "continue")
+                    if action == "finish":
+                        logger.info("提前结束规划")
+                        break
+                    elif action == "replan":
+                        current_plan = replan.get("new_plan", current_plan)
+                        logger.info("计划调整: %s", current_plan)
+
+                # 基于所有步骤结果生成最终答案
+                results_text = "\n".join(
+                    f"步骤{i+1}({r['step']}): {r['result'][:300]}"
+                    for i, r in enumerate(step_results)
+                )
+                final_llm = ChatOpenAI(
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
+                    model=settings.llm_model_name,
+                    temperature=0.1,
+                    max_tokens=4096,
+                )
+                final_prompt = f"{system_prompt}\n\n用户问题：{question}\n\n执行结果：\n{results_text}\n\n请基于以上结果回答用户问题。"
+                final_result = final_llm.invoke([("human", final_prompt)])
+                answer_text = final_result.content
+
+            # 反思循环（仅在有工具调用时触发，简单问候跳过）
+            reflection_count = 0
+            if settings.reflection_enabled and ctx.tools_called:
+                for i in range(settings.max_reflection_retries):
+                    reflection = self._reflect(question, answer_text, ctx.last_search_sources)
+                    if reflection.get("verdict") == "ok":
+                        break
+                    feedback = reflection.get("feedback", "")
+                    logger.info("反思第 %d 轮: %s", i + 1, feedback[:100])
+                    question_with_feedback = f"{question}\n\n[反馈] 上次回答有问题：{feedback}，请修正。"
+                    agent = create_agent(
+                        model=self.llm,
+                        tools=tools,
+                        system_prompt=system_prompt,
+                    )
+                    result = agent.invoke(
+                        {"messages": [("human", question_with_feedback)]},
+                        config={"recursion_limit": 30},
+                    )
+                    answer_text = result["messages"][-1].content
+                    reflection_count = i + 1
+
             return {
-                "answer": result["messages"][-1].content,
+                "answer": answer_text,
                 "sources": ctx.last_search_sources,
                 "is_agg": ctx.has_aggregation,
                 "tools_called": ctx.tools_called,
+                "reflection_count": reflection_count,
+                "plan": plan if plan else None,
             }
         except Exception as e:
             logger.error("Agent 执行失败: %s", e)
@@ -736,4 +889,6 @@ class RAGEngine:
                 "sources": ctx.last_search_sources,
                 "is_agg": ctx.has_aggregation,
                 "tools_called": ctx.tools_called,
+                "reflection_count": 0,
+                "plan": None,
             }

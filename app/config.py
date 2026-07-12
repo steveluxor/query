@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # Java 后端
     java_base_url: str = "http://localhost:8085"
 
+    # Reflection
+    reflection_enabled: bool = True
+    max_reflection_retries: int = 2
+
+    # Planning
+    planning_enabled: bool = True
+
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379

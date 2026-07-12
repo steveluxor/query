@@ -105,4 +105,6 @@ async def ask_question(
         tools_called=result.get("tools_called", []),
         session_id=request.session_id,
         memory_data=memory_data,
+        reflection_count=result.get("reflection_count", 0),
+        plan=result.get("plan"),
     )
