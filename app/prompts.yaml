@@ -11,9 +11,10 @@ tool_calling:
     - 计算结果以工具返回值为准，不要自行编造。
     - 不要反问用户，先调用 search_documents 搜索后再回答。
     - 当需要完整清单（如列出所有品牌、所有记录）时，先搜索然后调用 read_all_rows 获取全部数据行。
+    - 重要：检索结果只包含部分内容。如果搜索结果中没有找到某信息，不要断言该信息不存在，而应告知用户"在已检索到的内容中未找到"，并建议用户尝试其他搜索词或联系管理员确认。
 
-# ===== Reflection 评估提示词 =====
-reflection:
+# ===== Critic Agent =====
+critic:
   evaluate: |
     你是一个答案质量评估员。判断以下回答是否准确、完整、切题。
 
@@ -25,6 +26,8 @@ reflection:
     - 准确性：回答是否基于检索到的数据，有无编造
     - 完整性：是否回答了用户的问题
     - 相关性：回答是否切题
+    - 角色准确性：是否将文档作者/提交者误认为行为执行者？如果某人仅作为文档作者出现，回答中是否正确说明了这一点？
+    - 数据有效性：回答是否引用了空记录或无效数据？如果搜索结果中某条记录的关键字段（如品牌、产品名）均为空，回答中不应引用该记录
 
     返回 JSON：
     - {{"verdict": "ok"}} — 答案合格
@@ -37,19 +40,18 @@ planner:
   system: |
     你是一个任务规划器。根据用户问题，生成执行步骤列表。
 
-    可用工具：
-    - search_documents(query): 搜索知识库
-    - calculate_sum(key, filter): 求和
-    - calculate_rank(key, ascending, position): 排名
-    - read_all_rows(): 读取全部数据
-    - list_documents(): 列出文档
+    可用 Agent：
+    - knowledge: 知识检索，搜索文档、列出文档
+    - analysis: 数据分析，求和、排名、读取全部数据
 
     规则：
     - 步骤要具体，包含搜索词或计算参数
     - 简单问题（问候/闲聊/单步查询）返回空列表 []
     - 复杂问题（需要多步计算/对比/汇总）拆成 2-5 个步骤
+    - knowledge 步骤在前，analysis 步骤在后
+    - 每个步骤包含 agent 类型和具体指令
 
-    返回 JSON 数组：["步骤1", "步骤2", ...]
+    返回 JSON 数组：[{{"agent": "knowledge", "query": "搜索词"}}, {{"agent": "analysis", "query": "对XX求和"}}]
     只返回 JSON，不要解释。
 
 replanner:
@@ -62,7 +64,7 @@ replanner:
 
     返回 JSON：
     - {{"action": "continue"}} — 继续执行下一步
-    - {{"action": "replan", "new_plan": ["步骤1", ...]}} — 调整计划
+    - {{"action": "replan", "new_plan": [{{"agent": "knowledge", "query": "..."}}]}} — 调整计划
     - {{"action": "finish"}} — 提前结束，基于已有结果回答
 
     只返回 JSON，不要解释。

@@ -46,4 +46,24 @@ class AnswerResponse(BaseModel):
     session_id: str | None = None
     memory_data: dict | None = None
     reflection_count: int = 0
-    plan: list[str] | None = None
+    plan: list | None = None
+
+
+class AgentStepInfo(BaseModel):
+    """Agent 执行记录"""
+    name: str
+    duration_ms: int
+    summary: str
+
+
+class MultiAgentResponse(BaseModel):
+    """Multi-Agent 响应"""
+    answer: str
+    sources: list[Source]
+    is_agg: bool = False
+    tools_called: list[str] = []
+    session_id: str | None = None
+    memory_data: dict | None = None
+    reflection_count: int = 0
+    plan: list | None = None
+    agent_trace: list[AgentStepInfo] = []

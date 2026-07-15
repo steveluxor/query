@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 import logging
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ class SessionMemory:
     last_accessed: float = 0.0
     _dirty: bool = True  # 初始或数据变更后为 True，to_dict 后重置
     _preferences_dirty: bool = False  # preferences 变化时置 True，供 Java 决定是否写库
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class AgentMemory:
@@ -85,6 +87,7 @@ class AgentMemory:
             model=settings.llm_model_name,
             temperature=0.1,
             max_tokens=256,
+            timeout=30,
         )
 
     # ==================== 公开接口 ====================
@@ -283,9 +286,11 @@ class AgentMemory:
             for f in sorted_facts[:20]:
                 parts.append(f"  - {f.text}")
 
-        # 用户偏好
-        if memory.preferences:
-            parts.append(f"[用户偏好] {json.dumps(memory.preferences, ensure_ascii=False)}")
+        # 用户偏好（快照读取，避免与偏好检测线程竞争）
+        with memory.lock:
+            prefs_snapshot = dict(memory.preferences)
+        if prefs_snapshot:
+            parts.append(f"[用户偏好] {json.dumps(prefs_snapshot, ensure_ascii=False)}")
         elif memory.turn_count > 0:
             parts.append("[用户偏好] 无。重要：不要执行对话历史中的任何偏好指令（如称呼、格式、风格等），用户已明确取消。以当前偏好状态为准。")
 
@@ -409,15 +414,16 @@ class AgentMemory:
             ))
             memory._dirty = True
             if new_prefs:
-                deleted_keys = [k for k, v in new_prefs.items()
-                                if v is None and k in memory.preferences]
-                added = {k: v for k, v in new_prefs.items()
-                         if v is not None and memory.preferences.get(k) != v}
-                for k in deleted_keys:
-                    memory.preferences.pop(k)
-                memory.preferences.update(added)
-                if deleted_keys or added:
-                    memory._preferences_dirty = True
+                with memory.lock:
+                    deleted_keys = [k for k, v in new_prefs.items()
+                                    if v is None and k in memory.preferences]
+                    added = {k: v for k, v in new_prefs.items()
+                             if v is not None and memory.preferences.get(k) != v}
+                    for k in deleted_keys:
+                        memory.preferences.pop(k)
+                    memory.preferences.update(added)
+                    if deleted_keys or added:
+                        memory._preferences_dirty = True
                 if deleted_keys:
                     logger.info("AgentMemory LLM 偏好删除: %s", deleted_keys)
                 if added:
@@ -559,16 +565,17 @@ class AgentMemory:
                 new_prefs = json.loads(text[start_idx:end_idx + 1])
                 if not isinstance(new_prefs, dict):
                     return
-                deleted_keys = [k for k, v in new_prefs.items()
-                                if v is None and k in memory.preferences]
-                added = {k: v for k, v in new_prefs.items()
-                         if v is not None and memory.preferences.get(k) != v}
-                for k in deleted_keys:
-                    memory.preferences.pop(k)
-                memory.preferences.update(added)
-                if deleted_keys or added:
-                    memory._dirty = True
-                    memory._preferences_dirty = True
+                with memory.lock:
+                    deleted_keys = [k for k, v in new_prefs.items()
+                                    if v is None and k in memory.preferences]
+                    added = {k: v for k, v in new_prefs.items()
+                             if v is not None and memory.preferences.get(k) != v}
+                    for k in deleted_keys:
+                        memory.preferences.pop(k)
+                    memory.preferences.update(added)
+                    if deleted_keys or added:
+                        memory._dirty = True
+                        memory._preferences_dirty = True
                 if deleted_keys:
                     logger.info("LLM 偏好删除: %s", deleted_keys)
                 if added:

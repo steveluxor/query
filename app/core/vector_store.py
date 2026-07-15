@@ -74,6 +74,25 @@ class VectorStore:
             for doc, meta in zip(docs, metadatas)
         ]
 
+    def keyword_search(self, keywords: list[str], filter: dict | None = None,
+                       max_results: int = 20) -> list[tuple[Document, float]]:
+        """关键词搜索：在 chunk 内容中精确匹配关键词，返回匹配度评分"""
+        results = self._db.get(where=filter) if filter else self._db.get()
+        docs = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+
+        scored = []
+        for doc, meta in zip(docs, metadatas):
+            content_lower = doc.lower()
+            matched = sum(1 for kw in keywords if kw.lower() in content_lower)
+            if matched > 0:
+                score = matched / len(keywords)
+                scored.append((Document(page_content=doc, metadata=meta), score))
+
+        scored.sort(key=lambda x: -x[1])
+        logger.info("关键词搜索: keywords=%s, 匹配 %d 个 chunk", keywords, len(scored))
+        return scored[:max_results]
+
     def get_document_names(self) -> dict[int, str]:
         """获取所有文档ID→文件名映射（用于文件名匹配回退）"""
         results = self._db.get(include=["metadatas"])

@@ -1,22 +1,19 @@
-import json
 import logging
 import re
 from dataclasses import dataclass, field
 
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
-from langchain.agents import create_agent
 
 from app.config import settings
 from app.core.vector_store import VectorStore
-from app.prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class SearchContext:
-    """每次 answer() 调用独立的搜索上下文，避免多窗口并发干扰"""
+    """搜索上下文（Knowledge Agent 使用，兼容 /qa/ask 旧流程）"""
     last_search_chunks: list = field(default_factory=list)
     last_search_filtered: list = field(default_factory=list)
     last_search_all_chunks: list = field(default_factory=list)
@@ -24,6 +21,19 @@ class SearchContext:
     last_search_query: str = ""
     has_aggregation: bool = False
     search_count: int = 0
+    agg_count: int = 0
+    document_ids: list[int] | None = None
+    tools_called: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AnalysisContext:
+    """计算上下文（Analysis Agent 使用），接收搜索结果作为输入"""
+    chunks: list = field(default_factory=list)
+    filtered: list = field(default_factory=list)
+    all_chunks: list = field(default_factory=list)
+    sources: list[dict] = field(default_factory=list)
+    has_aggregation: bool = False
     agg_count: int = 0
     document_ids: list[int] | None = None
     tools_called: list[str] = field(default_factory=list)
@@ -40,19 +50,42 @@ class RAGEngine:
             model=settings.llm_model_name,
             temperature=0.1,
             max_tokens=4096,
+            timeout=30,
         )
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除
-    SCORE_THRESHOLD = 0.85
+    SCORE_THRESHOLD = 0.92
     DEFAULT_TOP_K = 10
 
     MAX_HISTORY_TURNS = 5
     MIN_GAP_THRESHOLD = 0.05
 
+    # ==================== 上下文兼容辅助 ====================
+
+    @staticmethod
+    def _ctx_chunks(ctx) -> list:
+        """从 SearchContext 或 AnalysisContext 获取 chunks"""
+        return getattr(ctx, 'last_search_chunks', None) or getattr(ctx, 'chunks', [])
+
+    @staticmethod
+    def _ctx_filtered(ctx) -> list:
+        return getattr(ctx, 'last_search_filtered', None) or getattr(ctx, 'filtered', [])
+
+    @staticmethod
+    def _ctx_all_chunks(ctx) -> list:
+        return getattr(ctx, 'last_search_all_chunks', None) or getattr(ctx, 'all_chunks', [])
+
+    @staticmethod
+    def _ctx_set_all_chunks(ctx, value):
+        if hasattr(ctx, 'last_search_all_chunks'):
+            ctx.last_search_all_chunks = value
+        else:
+            ctx.all_chunks = value
+
     # ==================== 工具定义 ====================
 
-    def _create_tools(self, ctx: SearchContext):
-        """创建绑定到 ctx 上下文实例的工具列表（标准 LangChain @tool 模式）"""
+    def _create_search_tools(self, ctx):
+        """搜索工具：search_documents, list_documents"""
 
         @tool
         def search_documents(query: str, row_start: int | None = None, row_end: int | None = None) -> str:
@@ -67,6 +100,28 @@ class RAGEngine:
                     "直接回答或调用 calculate_sum/calculate_rank 进行精确计算。"
                 )
             return self._execute_search(query, row_start, row_end, ctx)
+
+        @tool
+        def list_documents() -> str:
+            """列出当前知识库中可检索的文档数量和名称。当用户问"有多少文件"、"能搜到几个文档"、"有哪些文档"等元信息问题时调用。"""
+            ctx.tools_called.append("list_documents")
+            all_names = self.vector_store.get_document_names()
+            if ctx.document_ids:
+                matched = {did: all_names[did] for did in ctx.document_ids if did in all_names}
+            else:
+                matched = all_names
+            if not matched:
+                return "当前知识库中没有可检索的文档。"
+            lines = [f"共 {len(matched)} 个文档："]
+            for did, name in sorted(matched.items()):
+                lines.append(f"- [{did}] {name}")
+            return "\n".join(lines)
+
+        return [search_documents, list_documents]
+
+    def _create_analysis_tools(self, ctx):
+        """计算工具：calculate_sum, calculate_rank, read_all_rows
+        ctx 可以是 SearchContext 或 AnalysisContext，只要有 chunks/filtered/all_chunks 字段即可。"""
 
         @tool
         def calculate_sum(key_name: str, row_filter: str = "", content_filter: str = "") -> str:
@@ -102,23 +157,7 @@ class RAGEngine:
             ctx.tools_called.append("read_all_rows")
             return self._execute_read_all_rows(ctx)
 
-        @tool
-        def list_documents() -> str:
-            """列出当前知识库中可检索的文档数量和名称。当用户问"有多少文件"、"能搜到几个文档"、"有哪些文档"等元信息问题时调用。"""
-            ctx.tools_called.append("list_documents")
-            all_names = self.vector_store.get_document_names()
-            if ctx.document_ids:
-                matched = {did: all_names[did] for did in ctx.document_ids if did in all_names}
-            else:
-                matched = all_names
-            if not matched:
-                return "当前知识库中没有可检索的文档。"
-            lines = [f"共 {len(matched)} 个文档："]
-            for did, name in sorted(matched.items()):
-                lines.append(f"- [{did}] {name}")
-            return "\n".join(lines)
-
-        return [search_documents, calculate_sum, calculate_rank, read_all_rows, list_documents]
+        return [calculate_sum, calculate_rank, read_all_rows]
 
     # ==================== 搜索与结果处理 ====================
 
@@ -169,6 +208,30 @@ class RAGEngine:
     def _extract_chinese(text: str) -> set[str]:
         """提取字符串中的所有中文字符"""
         return {ch for ch in text if '一' <= ch <= '鿿'}
+
+    # 查询中的停用词（常见动词/助词/代词，不作为搜索关键词）
+    _STOP_WORDS = set("的了是在我有和人这中大为上个国我以要他时来用们生到作地于出会"
+
+                      "那就得着不没好能说过也后前里向下回己点起把让"
+
+                      "干做搞什么怎样如何哪些哪里谁几"
+
+                      "吗吧啊呢哦哈呀嗯")
+
+    @classmethod
+    def _extract_keywords(cls, text: str) -> list[str]:
+        """从查询中提取搜索关键词，使用 jieba 分词"""
+        import jieba
+        words = jieba.cut(text)
+        keywords = []
+        for w in words:
+            w = w.strip()
+            if len(w) < 2:
+                continue
+            if w in cls._STOP_WORDS:
+                continue
+            keywords.append(w)
+        return keywords
 
     def _filename_fallback(self, question: str, document_ids: list[int] | None = None) -> list:
         """当 embedding 检索无结果时，按文件名关键词匹配回退（优先 bigram，无匹配则降级到单字重叠）"""
@@ -272,6 +335,9 @@ class RAGEngine:
 
     EXCLUDE_KEYS = {"行号", "sheet_name", "file_name", "document_id", "chunk_index", "source"}
 
+    # 用于判断记录是否有实质内容的关键字段
+    EMPTY_CONTENT_KEYS = {"产品名", "品牌", "内容", "描述", "摘要", "标题", "姓名", "作者"}
+
     @staticmethod
     def _is_empty_record(content: str) -> bool:
         """检查 chunk 是否为空记录（所有标识类字段均为空值），排名/求和中跳过"""
@@ -279,7 +345,7 @@ class RAGEngine:
             if ":" in line:
                 k, _, val = line.partition(":")
                 k, val = k.strip(), val.strip()
-                if k in ("产品名", "品牌") and val not in ("(空)", "", "None"):
+                if k in RAGEngine.EMPTY_CONTENT_KEYS and val not in ("(空)", "", "None"):
                     return False
         return True
 
@@ -378,30 +444,6 @@ class RAGEngine:
         total = round(sum(v for _, v in values), 2)
         return total, len(values), values, key_name
 
-    # ==================== 历史处理 ====================
-
-    def _format_history(self, history: list | None, memory_context: str | None = None) -> str:
-        """将历史问答格式化为可读文本"""
-        if not history:
-            return ""
-        lines = ["<历史对话>"]
-        display = history[-self.MAX_HISTORY_TURNS:]
-        for h in display:
-            if isinstance(h, dict):
-                q = h.get("question", "")
-                a = h.get("answer", "")
-            else:
-                q = getattr(h, "question", "")
-                a = getattr(h, "answer", "")
-            lines.append(f"  用户：{q}")
-            lines.append(f"  助手：{a}")
-            lines.append("")
-        # 如果偏好已被清空，在历史末尾追加取消指令，覆盖历史中的旧偏好指令
-        if memory_context and "[用户偏好] 无" in memory_context:
-            lines.append("  [系统] 用户已取消之前的偏好指令，后续回答不再执行。")
-        lines.append("</历史对话>")
-        return "\n".join(lines)
-
     # ==================== Tool 执行体 ====================
 
     def _execute_search(self, query: str, row_start: int | None = None, row_end: int | None = None,
@@ -427,14 +469,42 @@ class RAGEngine:
             if selected:
                 selected.sort(key=lambda x: x[0].metadata.get("row_number", 0))
                 filtered = []
-                logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk", start, end, len(selected))
+                # 检查是否返回了完整范围的数据
+                found_rows = {doc.metadata.get("row_number") for doc, _ in selected}
+                expected_rows = set(range(start, end + 1))
+                missing_rows = expected_rows - found_rows
+                if missing_rows:
+                    logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk, 缺失行: %s",
+                                start, end, len(selected), sorted(missing_rows)[:10])
+                else:
+                    logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk (完整)", start, end, len(selected))
             else:
                 logger.info("行号范围查询: 未找到 %d~%d 范围内的数据", start, end)
                 return f"未找到行号 {start}~{end} 范围内的数据。"
         else:
-            # 相似度搜索
+            # 提取关键词用于搜索和验证
+            keywords = self._extract_keywords(query)
+            logger.info("提取关键词: %s", keywords)
+
+            # 1. Embedding 相似度搜索
             results = self.vector_store.similarity_search(query, k=60, filter=doc_filter)
             filtered = [(doc, score) for doc, score in results if score <= self.SCORE_THRESHOLD]
+
+            # 2. 关键词搜索（补充 embedding 可能遗漏的文档）
+            keyword_results = []
+            if keywords:
+                keyword_results = self.vector_store.keyword_search(keywords, filter=doc_filter)
+
+            # 3. 合并结果：关键词匹配的文档优先补入
+            if keyword_results:
+                selected_doc_ids = {doc.metadata.get("document_id") for doc, _ in filtered} if filtered else set()
+                for doc, kw_score in keyword_results:
+                    did = doc.metadata.get("document_id")
+                    # 如果是新文档，补入（用较低的 score 确保排在前面）
+                    if did not in selected_doc_ids:
+                        filtered.append((doc, 0.3))  # 关键词匹配给予较好分数
+                        selected_doc_ids.add(did)
+                        logger.info("关键词搜索补入: %s (doc_id=%s)", doc.metadata.get("file_name", ""), did)
 
             if not filtered:
                 fallback_chunks = self._filename_fallback(query, ctx.document_ids)
@@ -444,34 +514,23 @@ class RAGEngine:
                 filtered = []
                 logger.info("文件名回退: 共 %d 个 chunk", len(selected))
             else:
+                # 4. 验证：过滤掉不含关键词的假阳性（仅在有明确关键词时）
+                if keywords:
+                    verified = []
+                    for doc, score in filtered:
+                        content_lower = doc.page_content.lower()
+                        if any(kw.lower() in content_lower for kw in keywords):
+                            verified.append((doc, score))
+                        else:
+                            logger.info("假阳性过滤: %s (不含关键词 %s)", doc.metadata.get("file_name", ""), keywords)
+                    if verified:
+                        filtered = verified
+
                 actual_top_k = self._determine_top_k(filtered)
                 if actual_top_k >= len(filtered):
                     selected = filtered
                 else:
                     selected = self._select_by_diversity(filtered, actual_top_k)
-
-                    # 关键词补入：未选中文档中，文件名/内容含查询关键词的补入最佳 chunk
-                    query_bigrams = self._bigrams(query)
-                    query_chars = self._extract_chinese(query)
-                    if query_bigrams or query_chars:
-                        selected_doc_ids = {doc.metadata.get("document_id") for doc, _ in selected}
-                        unmatched = [(d, s) for d, s in filtered if d.metadata.get("document_id") not in selected_doc_ids]
-                        best_per_doc = {}
-                        for doc_in, score_in in unmatched:
-                            fn = doc_in.metadata.get("file_name", "").lower()
-                            content = doc_in.page_content.lower()
-                            # 优先 bigram 匹配（更精确）
-                            matched = bool(query_bigrams) and any(t in fn or t in content for t in query_bigrams)
-                            # 降级到单字匹配
-                            if not matched:
-                                matched = bool(query_chars) and any(ch in fn or ch in content for ch in query_chars)
-                            if matched:
-                                did = doc_in.metadata.get("document_id")
-                                if did not in best_per_doc or score_in < best_per_doc[did][1]:
-                                    best_per_doc[did] = (doc_in, score_in)
-                        for did, (doc_in, score_in) in best_per_doc.items():
-                            selected.append((doc_in, score_in))
-                            logger.info("关键词补入 → %s (score=%.4f)", doc_in.metadata.get("file_name", ""), score_in)
 
                 # 文件名补充：embedding 漏掉的文档
                 fallback_chunks = self._filename_fallback(query, ctx.document_ids)
@@ -539,25 +598,40 @@ class RAGEngine:
             context_parts.append(f"[{label}]\n{doc.page_content}")
         result = f"检索到以下相关内容：\n\n" + "\n\n".join(context_parts)
 
-        # 提示 LLM 搜索仅返回部分数据（仅在非行号范围搜索时提示）
-        if row_start is None and row_end is None:
-            result += f"\n\n注意：以上只显示了部分检索结果。如需查看完整文档的全部数据，请调用 read_all_rows 工具。"
+        # 检查数据完整性，提示 LLM 是否需要调用 read_all_rows
+        is_incomplete = False
+        if row_start is not None and row_end is not None:
+            # 行号范围查询：检查是否返回了完整范围
+            found_rows = {doc.metadata.get("row_number") for doc, _ in selected}
+            expected_count = row_end - row_start + 1
+            if len(found_rows) < expected_count:
+                is_incomplete = True
+        elif row_start is None and row_end is None:
+            # 普通搜索：总是提示可能不完整
+            is_incomplete = True
+
+        if is_incomplete:
+            result += (
+                "\n\n【重要】以上只显示了部分数据。"
+                "你必须立即调用 read_all_rows 工具获取完整数据，不要跳过此步骤。"
+                "在获取完整数据之前，不要生成最终回答。"
+            )
 
         logger.info("search_documents 返回 %d 个 chunk", len(selected))
         return result
 
     def _execute_sum(self, key_name: str, row_filter: str = "", content_filter: str = "",
-                     ctx: SearchContext | None = None) -> str:
+                     ctx=None) -> str:
         """对已检索结果执行求和，返回格式化计算结果"""
         ctx = ctx or SearchContext()
         ctx.has_aggregation = True
-        chunks = ctx.last_search_chunks
+        chunks = self._ctx_chunks(ctx)
         if not chunks:
             return "没有可计算的数据，请先调用 search_documents 搜索相关内容。"
         logger.info("执行求和: key_name='%s', row_filter='%s', content_filter='%s'", key_name, row_filter, content_filter)
 
         rf = self._parse_row_filter(row_filter) if row_filter else None
-        pool = self._load_all_chunks(ctx) or ctx.last_search_filtered or chunks
+        pool = self._load_all_chunks(ctx) or self._ctx_filtered(ctx) or chunks
 
         # 内容过滤
         cf = self._parse_content_filter(content_filter)
@@ -594,16 +668,16 @@ class RAGEngine:
         return result
 
     def _execute_rank(self, key_name: str, ascending: bool, position: int = 1, content_filter: str = "",
-                      ctx: SearchContext | None = None) -> str:
+                      ctx=None) -> str:
         """对已检索结果执行排序，返回格式化排名结果"""
         ctx = ctx or SearchContext()
         ctx.has_aggregation = True
-        chunks = ctx.last_search_chunks
+        chunks = self._ctx_chunks(ctx)
         if not chunks:
             return "没有可计算的数据，请先调用 search_documents 搜索相关内容。"
         logger.info("执行排名: key_name='%s', ascending=%s, position=%d, content_filter='%s'", key_name, ascending, position, content_filter)
 
-        pool = self._load_all_chunks(ctx) or ctx.last_search_filtered or chunks
+        pool = self._load_all_chunks(ctx) or self._ctx_filtered(ctx) or chunks
         # 内容过滤
         cf = self._parse_content_filter(content_filter)
         if cf:
@@ -636,13 +710,15 @@ class RAGEngine:
 
     # ==================== 全量数据加载 ====================
 
-    def _load_all_chunks(self, ctx: SearchContext) -> list:
+    def _load_all_chunks(self, ctx) -> list:
         """惰性加载当前搜索文档的全部 chunk，供 sum/rank/read_all_rows 使用"""
-        if ctx.last_search_all_chunks:
-            return ctx.last_search_all_chunks
+        cached = self._ctx_all_chunks(ctx)
+        if cached:
+            return cached
 
+        chunks = self._ctx_chunks(ctx)
         relevant_ids = list({doc.metadata.get("document_id")
-                             for doc, _ in ctx.last_search_chunks or []
+                             for doc, _ in chunks or []
                              if doc.metadata.get("document_id")})
         if not relevant_ids:
             logger.warning("全量加载: 无相关文档 ID")
@@ -651,18 +727,19 @@ class RAGEngine:
         full_filter = {"document_id": {"$in": relevant_ids}}
         AGG_EXCLUDE = ["总计", "合计", "小计"]
         all_chunks = self.vector_store.get_all_chunks(filter=full_filter)
-        ctx.last_search_all_chunks = [
+        filtered = [
             (doc, 0.0) for doc, _ in all_chunks
             if doc.metadata.get("sheet_name") != "汇总"
             and not any(kw in doc.page_content for kw in AGG_EXCLUDE)
             and not self._is_empty_record(doc.page_content)
         ] or all_chunks
-        logger.info("全量数据加载: %d 个文档, %d 个 chunk", len(relevant_ids), len(ctx.last_search_all_chunks))
-        return ctx.last_search_all_chunks
+        self._ctx_set_all_chunks(ctx, filtered)
+        logger.info("全量数据加载: %d 个文档, %d 个 chunk", len(relevant_ids), len(filtered))
+        return filtered
 
-    def _execute_read_all_rows(self, ctx: SearchContext) -> str:
+    def _execute_read_all_rows(self, ctx) -> str:
         """返回已搜索文档的完整数据行"""
-        if not ctx.last_search_chunks:
+        if not self._ctx_chunks(ctx):
             logger.info("read_all_rows 被调用但无已搜索数据")
             return "没有可读取的数据，请先调用 search_documents 搜索相关内容。"
 
@@ -682,213 +759,4 @@ class RAGEngine:
 
         return "以下是完整数据：\n\n" + "\n\n".join(rows) + "\n\n以上为该文档全部数据。"
 
-    # ==================== 反思 ====================
 
-    def _reflect(self, question: str, answer_text: str, sources: list[dict]) -> dict:
-        """评估答案质量，返回 {"verdict": "ok"} 或 {"verdict": "revise", "feedback": "..."}"""
-        llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0,
-        )
-        sources_text = "\n".join(
-            f"- [{s.get('file_name', '')}] {s.get('content', '')[:200]}"
-            for s in sources[:5]
-        )
-        prompt = PromptManager.get("reflection", "evaluate").format(
-            question=question, sources=sources_text, answer=answer_text,
-        )
-        try:
-            result = llm.invoke([("human", prompt)])
-            return json.loads(result.content)
-        except Exception:
-            return {"verdict": "ok"}
-
-    # ==================== Plan-and-Execute ====================
-
-    def _plan(self, question: str, memory_context: str | None = None) -> list[str]:
-        """生成执行计划，简单问题返回空列表"""
-        llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0,
-        )
-        prompt = PromptManager.get("planner", "system")
-        if memory_context:
-            prompt += f"\n\n长期记忆：{memory_context}"
-        prompt += f"\n\n用户问题：{question}"
-
-        try:
-            result = llm.invoke([("human", prompt)])
-            plan = json.loads(result.content)
-            return plan if isinstance(plan, list) else []
-        except Exception:
-            return []
-
-    def _execute_step(self, step: str, ctx: SearchContext) -> str:
-        """执行单个步骤，复用现有工具"""
-        llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0,
-            max_tokens=4096,
-        )
-        tools = self._create_tools(ctx)
-        agent = create_agent(
-            model=llm,
-            tools=tools,
-            system_prompt="你是一个执行器。根据步骤描述，调用工具完成任务。只返回工具结果，不要总结。",
-        )
-        try:
-            result = agent.invoke({"messages": [("human", step)]}, config={"recursion_limit": 10})
-            return result["messages"][-1].content
-        except Exception as e:
-            logger.warning("步骤执行失败: %s", e)
-            return f"执行失败: {e}"
-
-    def _replan(self, question: str, plan: list[str], step_index: int, step_result: str) -> dict:
-        """根据执行结果调整计划"""
-        llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0,
-        )
-        results_summary = f"步骤{step_index + 1}({plan[step_index]})结果：{step_result[:200]}"
-        prompt = PromptManager.get("replanner", "system").format(
-            question=question, plan=plan, results=results_summary,
-        )
-        try:
-            result = llm.invoke([("human", prompt)])
-            return json.loads(result.content)
-        except Exception:
-            return {"action": "continue"}
-
-    # ==================== 主入口 ====================
-
-    def answer(self, question: str, top_k: int = None, document_ids: list[int] | None = None,
-               history: list[dict] | None = None, strategy: str = None,
-               memory_context: str | None = None):
-        """使用 Tool Calling 执行 RAG 问答：LLM 自主决定搜索/计算/回答"""
-        if top_k is None:
-            top_k = self.DEFAULT_TOP_K
-
-        # 创建独立上下文，避免多窗口并发干扰
-        ctx = SearchContext(document_ids=document_ids)
-
-        # 格式化历史
-        history_text = self._format_history(history, memory_context)
-
-        # 构建 system prompt
-        system_prompt = PromptManager.get("tool_calling", "system")
-
-        # 长期记忆注入（摘要/事实/偏好）
-        if memory_context:
-            system_prompt += f"\n\n<长期记忆>\n{memory_context}\n</长期记忆>"
-
-        if history_text:
-            system_prompt += f"\n\n<history>\n{history_text}\n</history>"
-
-        # 如果偏好已清空，在 system prompt 末尾追加强制取消指令（优先级最高）
-        if memory_context and "[用户偏好] 无" in memory_context:
-            system_prompt += "\n\n[强制指令] 用户已取消所有偏好设置。忽略对话历史中的任何偏好指令（称呼、格式、风格等），不要执行。"
-
-        # 标准 LangChain Agent (LangGraph 模式)
-        tools = self._create_tools(ctx)
-
-        # 生成计划（规划模式）
-        plan = self._plan(question, memory_context) if settings.planning_enabled else []
-
-        try:
-            if not plan:
-                # 简单问题或规划关闭，走原有流程
-                agent = create_agent(
-                    model=self.llm,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                )
-                result = agent.invoke(
-                    {"messages": [("human", question)]},
-                    config={"recursion_limit": 30},
-                )
-                answer_text = result["messages"][-1].content
-            else:
-                # 复杂问题，走规划流程
-                logger.info("执行计划: %s", plan)
-                step_results = []
-                current_plan = list(plan)
-
-                for i, step in enumerate(current_plan):
-                    step_result = self._execute_step(step, ctx)
-                    step_results.append({"step": step, "result": step_result})
-                    logger.info("步骤 %d/%d 完成: %s", i + 1, len(current_plan), step[:50])
-
-                    # 每步后重新规划
-                    replan = self._replan(question, current_plan, i, step_result)
-                    action = replan.get("action", "continue")
-                    if action == "finish":
-                        logger.info("提前结束规划")
-                        break
-                    elif action == "replan":
-                        current_plan = replan.get("new_plan", current_plan)
-                        logger.info("计划调整: %s", current_plan)
-
-                # 基于所有步骤结果生成最终答案
-                results_text = "\n".join(
-                    f"步骤{i+1}({r['step']}): {r['result'][:300]}"
-                    for i, r in enumerate(step_results)
-                )
-                final_llm = ChatOpenAI(
-                    api_key=settings.llm_api_key,
-                    base_url=settings.llm_base_url,
-                    model=settings.llm_model_name,
-                    temperature=0.1,
-                    max_tokens=4096,
-                )
-                final_prompt = f"{system_prompt}\n\n用户问题：{question}\n\n执行结果：\n{results_text}\n\n请基于以上结果回答用户问题。"
-                final_result = final_llm.invoke([("human", final_prompt)])
-                answer_text = final_result.content
-
-            # 反思循环（仅在有工具调用时触发，简单问候跳过）
-            reflection_count = 0
-            if settings.reflection_enabled and ctx.tools_called:
-                for i in range(settings.max_reflection_retries):
-                    reflection = self._reflect(question, answer_text, ctx.last_search_sources)
-                    if reflection.get("verdict") == "ok":
-                        break
-                    feedback = reflection.get("feedback", "")
-                    logger.info("反思第 %d 轮: %s", i + 1, feedback[:100])
-                    question_with_feedback = f"{question}\n\n[反馈] 上次回答有问题：{feedback}，请修正。"
-                    agent = create_agent(
-                        model=self.llm,
-                        tools=tools,
-                        system_prompt=system_prompt,
-                    )
-                    result = agent.invoke(
-                        {"messages": [("human", question_with_feedback)]},
-                        config={"recursion_limit": 30},
-                    )
-                    answer_text = result["messages"][-1].content
-                    reflection_count = i + 1
-
-            return {
-                "answer": answer_text,
-                "sources": ctx.last_search_sources,
-                "is_agg": ctx.has_aggregation,
-                "tools_called": ctx.tools_called,
-                "reflection_count": reflection_count,
-                "plan": plan if plan else None,
-            }
-        except Exception as e:
-            logger.error("Agent 执行失败: %s", e)
-            return {
-                "answer": "抱歉，生成答案时出现错误，请稍后重试。",
-                "sources": ctx.last_search_sources,
-                "is_agg": ctx.has_aggregation,
-                "tools_called": ctx.tools_called,
-                "reflection_count": 0,
-                "plan": None,
-            }

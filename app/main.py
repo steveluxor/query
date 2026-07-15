@@ -12,6 +12,8 @@ from app.core.rag_engine import RAGEngine
 from app.core.vector_store import VectorStore
 from app.core.agent_memory import AgentMemory
 from app.core.redis_store import RedisStore
+from app.core.agent_orchestrator import AgentOrchestrator
+from app.mcp_client import MCPClient
 from app.exceptions import BizException, ErrorCode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -25,8 +27,24 @@ async def lifespan(application: FastAPI):
     application.state.rag_engine = RAGEngine(vs)
     application.state.agent_memory = AgentMemory()
     application.state.redis_store = RedisStore()
+
+    # 初始化 MCP Client
+    mcp_client = MCPClient(
+        server_command="python",
+        server_args=["-m", "app.mcp_server"]
+    )
+    await mcp_client.connect()
+    application.state.mcp_client = mcp_client
+
+    application.state.orchestrator = AgentOrchestrator(
+        rag_engine=application.state.rag_engine,
+        agent_memory=application.state.agent_memory,
+        redis_store=application.state.redis_store,
+        mcp_client=mcp_client,
+    )
     yield
     # 资源清理
+    await mcp_client.disconnect()
     application.state.rag_engine = None
     application.state.agent_memory = None
     await application.state.redis_store.close()

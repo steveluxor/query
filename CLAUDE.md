@@ -122,7 +122,7 @@ pip install -e .
 
 ### 修改注意事项
 - 文档切片参数修改在 `core/document_processor.py` (chunk_size, chunk_overlap)
-- RAG 检索阈值修改在 `core/rag_engine.py` (余弦距离阈值 0.85)
+- RAG 检索阈值修改在 `core/rag_engine.py` (余弦距离阈值 0.92)
 - Embedding 模型切换需修改 `.env` 中的 `EMBEDDING_MODEL_NAME` 和 `OLLAMA_BASE_URL`
 - LLM 模型切换需修改 `.env` 中的 `LLM_MODEL_NAME` 和 `LLM_BASE_URL`
 - 修改 API 路径需同步更新 Java 后端 `QaServiceImpl` 和 `DocumentServiceImpl` 中的 HTTP 调用
