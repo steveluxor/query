@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 from mcp.server.fastmcp import FastMCP
@@ -25,17 +26,36 @@ class MCPState:
 
 
 @mcp.tool()
+async def set_document_ids(ids: list[int]) -> str:
+    """设置当前用户有权限访问的文档 ID 列表。在搜索前必须调用。"""
+    MCPState.document_ids = ids
+    logger.info("[MCP] set_document_ids: %d 个文档", len(ids))
+    return f"已设置 {len(ids)} 个可访问文档"
+
+
+@mcp.tool()
 async def search_documents(query: str, row_start: int | None = None, row_end: int | None = None) -> str:
     """从知识库中搜索与问题相关的文档内容。需要查找具体信息、数据、记录时调用。搜索词应具体，包含数据中可能的列名。
     如果要查询特定行号范围（如"第90到100行"、"第91行之后"），请传入 row_start 和 row_end 参数。"""
     logger.info("[MCP] search_documents: query='%s', row_start=%s, row_end=%s", query, row_start, row_end)
 
     ctx = SearchContext(document_ids=MCPState.document_ids)
-    result = rag_engine._execute_search(query, row_start, row_end, ctx)
+    raw_result = rag_engine._execute_search(query, row_start, row_end, ctx)
 
     # 缓存状态，供后续工具使用
     MCPState.search_ctx = ctx
-    return result
+
+    # 解析结果，提取数据完整性信息
+    rows_returned = len(ctx.last_search_chunks) if ctx.last_search_chunks else 0
+    is_complete = "以上只显示了部分数据" not in raw_result if ctx.last_search_chunks else True
+    available_actions = ["read_all_rows"] if not is_complete else []
+
+    return json.dumps({
+        "rows_returned": rows_returned,
+        "is_complete": is_complete,
+        "available_actions": available_actions,
+        "data": raw_result,
+    }, ensure_ascii=False)
 
 
 @mcp.tool()

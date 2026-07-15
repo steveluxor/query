@@ -32,10 +32,10 @@ class QuestionRequest(BaseModel):
 
 
 class Source(BaseModel):
-    document_id: int
+    document_id: int | None = None
     file_name: str
     content: str
-    score: float
+    score: float | None = None
 
 
 class AnswerResponse(BaseModel):

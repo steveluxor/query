@@ -489,11 +489,17 @@ class RAGEngine:
             # 1. Embedding 相似度搜索
             results = self.vector_store.similarity_search(query, k=60, filter=doc_filter)
             filtered = [(doc, score) for doc, score in results if score <= self.SCORE_THRESHOLD]
+            logger.info("搜索诊断: embedding返回=%d, 阈值过滤后=%d, 文档数=%d",
+                        len(results), len(filtered),
+                        len({doc.metadata.get("document_id") for doc, _ in filtered}))
 
             # 2. 关键词搜索（补充 embedding 可能遗漏的文档）
             keyword_results = []
             if keywords:
                 keyword_results = self.vector_store.keyword_search(keywords, filter=doc_filter)
+                logger.info("搜索诊断: 关键词匹配=%d, 文档数=%d",
+                            len(keyword_results),
+                            len({doc.metadata.get("document_id") for doc, _ in keyword_results}))
 
             # 3. 合并结果：关键词匹配的文档优先补入
             if keyword_results:
@@ -514,18 +520,9 @@ class RAGEngine:
                 filtered = []
                 logger.info("文件名回退: 共 %d 个 chunk", len(selected))
             else:
-                # 4. 验证：过滤掉不含关键词的假阳性（仅在有明确关键词时）
-                if keywords:
-                    verified = []
-                    for doc, score in filtered:
-                        content_lower = doc.page_content.lower()
-                        if any(kw.lower() in content_lower for kw in keywords):
-                            verified.append((doc, score))
-                        else:
-                            logger.info("假阳性过滤: %s (不含关键词 %s)", doc.metadata.get("file_name", ""), keywords)
-                    if verified:
-                        filtered = verified
-
+                logger.info("搜索诊断: 合并后=%d chunk, 文档数=%d",
+                            len(filtered),
+                            len({doc.metadata.get("document_id") for doc, _ in filtered}))
                 actual_top_k = self._determine_top_k(filtered)
                 if actual_top_k >= len(filtered):
                     selected = filtered

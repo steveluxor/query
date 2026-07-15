@@ -6,13 +6,43 @@ from langchain_openai import ChatOpenAI
 from app.config import settings
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.prompt_manager import PromptManager
+from app.models.data_types import CriticResult, AgentTrace
 
 logger = logging.getLogger(__name__)
 
+CRITIC_PROMPT = """你是一个答案质量评估员。根据证据和分析结果，判断回答是否准确、完整。
+
+用户问题：{question}
+
+证据：
+{evidence}
+
+分析结果：
+{analysis}
+
+生成回答：{answer}
+
+评估标准：
+- 准确性：回答是否基于证据，有无编造
+- 完整性：是否回答了用户的问题
+- 来源引用：是否正确引用了来源
+- 逻辑一致性：回答是否与分析结果矛盾
+
+返回 JSON：
+- {{"score": 8, "problems": [], "need_retry": false, "retry_target": "all"}} — 答案合格
+- {{"score": 4, "problems": ["缺少来源引用"], "need_retry": true, "retry_target": "generator"}} — 需要修改
+
+retry_target 取值：
+- "knowledge": 证据提取有问题，需要重新检索
+- "analysis": 计算/分析有问题，需要重新分析
+- "generator": 表达有问题，只需要重新生成回答
+- "all": 严重问题，需要全部重来
+
+只返回 JSON，不要解释。"""
+
 
 class CriticAgent(BaseAgent):
-    """Critic Agent：独立审核答案质量，输出 verdict 和 feedback"""
+    """Critic Agent：审核答案质量，输出 CriticResult"""
 
     name = "Critic"
 
@@ -26,27 +56,103 @@ class CriticAgent(BaseAgent):
         )
 
     async def run(self, context: AgentContext) -> AgentContext:
-        sources_text = "\n".join(
-            f"- [{s.get('file_name', '')}] {s.get('content', '')[:200]}"
-            for s in context.sources[:5]
-        )
-        prompt = PromptManager.get("critic", "evaluate").format(
-            question=context.question,
-            sources=sources_text,
-            answer=context.answer,
-        )
+        import time
+        start = time.time()
+
+        prompt = self._build_prompt(context)
+
         try:
             result = self.llm.invoke([("human", prompt)])
-            reflection = json.loads(result.content)
-        except Exception:
-            reflection = {"verdict": "ok"}
+            critic_result = self._parse_result(result.content)
+        except Exception as e:
+            logger.warning("[Critic] LLM 调用失败: %s", e)
+            critic_result = CriticResult(score=10, need_retry=False)
 
-        if reflection.get("verdict") == "ok":
-            logger.info("[Critic] 答案通过审核")
+        context.set_critique(
+            critique=json.dumps(critic_result.problems, ensure_ascii=False) if critic_result.problems else "",
+            need_retry=critic_result.need_retry,
+            retry_target=critic_result.retry_target,
+        )
+
+        if critic_result.need_retry:
+            logger.info("[Critic] 答案需要修改 (score=%d, target=%s): %s",
+                        critic_result.score, critic_result.retry_target, critic_result.problems)
         else:
-            feedback = reflection.get("feedback", "")
-            context.critique = feedback
-            context.reflection_count += 1
-            logger.info("[Critic] 答案需要修改: %s", feedback[:100])
+            logger.info("[Critic] 答案通过审核 (score=%d)", critic_result.score)
+
+        duration = int((time.time() - start) * 1000)
+        context.add_trace(AgentTrace(
+            agent="Critic",
+            start_time=str(int(start * 1000)),
+            end_time=str(int(time.time() * 1000)),
+            tools_called=[],
+            input_summary=f"evidence={len(context.evidence)}",
+            output_summary=f"score={critic_result.score}, retry={critic_result.need_retry}",
+        ))
 
         return context
+
+    def _build_prompt(self, context: AgentContext) -> str:
+        # 格式化 evidence
+        if context.evidence:
+            evidence_text = "\n".join(
+                f"  - [{ev.source}] {ev.statement}" for ev in context.evidence
+            )
+        else:
+            evidence_text = "  无"
+
+        # 格式化 analysis
+        if context.analysis:
+            parts = []
+            if context.analysis.calculations:
+                parts.append("计算：" + ", ".join(
+                    f"{c.operation}({c.field})={c.result}" for c in context.analysis.calculations
+                ))
+            if context.analysis.findings:
+                parts.append("发现：" + "; ".join(context.analysis.findings))
+            analysis_text = "  " + "\n  ".join(parts) if parts else "  无"
+        else:
+            analysis_text = "  无"
+
+        return CRITIC_PROMPT.format(
+            question=context.question,
+            evidence=evidence_text,
+            analysis=analysis_text,
+            answer=context.answer or "(无回答)",
+        )
+
+    def _parse_result(self, text: str) -> CriticResult:
+        """解析 CriticResult JSON"""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            if "```" in text:
+                parts = text.split("```")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("json"):
+                        part = part[4:]
+                    try:
+                        data = json.loads(part.strip())
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    return CriticResult(score=10, need_retry=False)
+            else:
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end > start:
+                    try:
+                        data = json.loads(text[start:end + 1])
+                    except json.JSONDecodeError:
+                        return CriticResult(score=10, need_retry=False)
+                else:
+                    return CriticResult(score=10, need_retry=False)
+
+        return CriticResult(
+            score=data.get("score", 10),
+            problems=data.get("problems", []),
+            need_retry=data.get("need_retry", False),
+            retry_target=data.get("retry_target", "all"),
+        )

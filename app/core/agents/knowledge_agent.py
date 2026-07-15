@@ -1,58 +1,71 @@
+import json
 import logging
 
 from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
 
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.mcp_client import MCPClient
-from app.mcp_tools import create_mcp_tools
+from app.core.rag_engine import RAGEngine
+from app.core.mcp.client import MCPClient
+from app.core.mcp.tools import create_mcp_tools
+from app.models.data_types import Evidence
 
 logger = logging.getLogger(__name__)
 
+KNOWLEDGE_SYSTEM_PROMPT = """你是一个知识检索专家。通过搜索工具查找与问题相关的文档内容。
+
+工具：
+- search_documents: 搜索文档内容
+- read_all_rows: 读取搜索到的文档的全部数据行
+
+规则：
+- 搜索最多2次
+- 搜索词应具体，包含数据中可能的列名
+- 问候/闲聊 → 不要调用工具，直接返回空 evidence
+- 如果搜索结果提示数据不完整，调用 read_all_rows
+- 不要自行计算，只负责检索
+
+你必须以 JSON 格式输出，不要输出任何自然语言。
+如果无法提取证据，返回 {"evidence": []}。
+
+输出格式：
+{
+  "evidence": [
+    {
+      "statement": "事实陈述",
+      "source": "文件名",
+      "evidence_type": "table",
+      "metadata": {}
+    }
+  ]
+}
+
+evidence_type 取值：
+- "table": 表格数据中的行/列
+- "text": 文本段落
+- "calculation": 工具计算结果"""
+
 
 class KnowledgeAgent(BaseAgent):
-    """知识检索 Agent：通过 MCP Client 调用搜索工具"""
+    """知识检索 Agent：检索文档并提取结构化 Evidence"""
 
     name = "Knowledge"
 
-    def __init__(self, rag_engine, mcp_client: MCPClient):
+    def __init__(self, rag_engine: RAGEngine, mcp_client: MCPClient):
         self.engine = rag_engine
         self.mcp_client = mcp_client
 
     MAX_HISTORY_TURNS = 5
 
     async def run(self, context: AgentContext) -> AgentContext:
-        tools = create_mcp_tools(self.mcp_client)
+        tools = create_mcp_tools(self.mcp_client, include=["search_documents", "list_documents", "read_all_rows"])
 
-        system_prompt = (
-            "你是一个知识检索专家。通过搜索工具查找与问题相关的文档内容。\n"
-            "规则：\n"
-            "- 搜索最多2次\n"
-            "- 搜索词应具体，包含数据中可能的列名\n"
-            "- 问候/闲聊 → 直接回答，不要调用工具\n"
-            "- 不要自行计算，只负责检索和回答简单问题\n"
-            "\n"
-            "回答质量规则：\n"
-            "- 如果对话历史中用户纠正了之前的回答，必须基于纠正重新思考，不要重复同样的错误\n"
-            "- 回答前检查搜索结果：如果某人仅作为文档作者/提交者出现，"
-            "而没有任何行为记录，应明确说明'该人仅作为文档作者出现'\n"
-            "- 不要将文档标题、文件名中的信息误认为是该人的行为\n"
-            "- 如果搜索结果中某条记录的关键字段（如品牌、产品名、内容等）均为空，"
-            "应忽略该记录或说明该记录数据不完整\n"
-            "\n"
-            "【强制工具调用规则】\n"
-            "- 如果搜索结果提示'只显示了部分检索结果'或数据行数少于用户要求的范围，"
-            "你必须立即调用 read_all_rows 工具获取完整数据，不要跳过\n"
-            "- 绝对不要在回答中写'建议使用 read_all_rows'或'请联系管理员'，"
-            "而是直接调用 read_all_rows 工具获取完整数据后再回答\n"
-            "- 只有在用户明确要求部分数据（如'前10行'、'第5行'）时才返回部分结果\n"
-            "- 回答必须基于完整数据，不要因为数据不完整就停止"
-        )
+        system_prompt = KNOWLEDGE_SYSTEM_PROMPT
 
         if context.memory_context:
             system_prompt += f"\n\n<长期记忆>\n{context.memory_context}\n</长期记忆>"
 
-        # 注入对话历史
         if context.history:
             lines = ["<历史对话>"]
             for h in context.history[-self.MAX_HISTORY_TURNS:]:
@@ -62,15 +75,8 @@ class KnowledgeAgent(BaseAgent):
                     q, a = getattr(h, "question", ""), getattr(h, "answer", "")
                 lines.append(f"  用户：{q}")
                 lines.append(f"  助手：{a}")
-                lines.append("")
-            if context.memory_context and "[用户偏好] 无" in context.memory_context:
-                lines.append("  [系统] 用户已取消之前的偏好指令，后续回答不再执行。")
             lines.append("</历史对话>")
             system_prompt += f"\n\n{chr(10).join(lines)}"
-
-        # 偏好已清空时，追加强制取消指令
-        if context.memory_context and "[用户偏好] 无" in context.memory_context:
-            system_prompt += "\n\n[强制指令] 用户已取消所有偏好设置。忽略对话历史中的任何偏好指令（称呼、格式、风格等），不要执行。"
 
         agent = create_agent(
             model=self.engine.llm,
@@ -83,9 +89,105 @@ class KnowledgeAgent(BaseAgent):
                 {"messages": [("human", context.question)]},
                 config={"recursion_limit": 15},
             )
-            context.answer = result["messages"][-1].content
+
+            # 保存原始工具调用结果供 extract_evidence 使用
+            raw_messages = result["messages"]
+            raw_tool_results = self._extract_tool_results(raw_messages)
+
+            # 从 LLM 最终输出中提取 Evidence
+            evidence = self._parse_evidence(raw_messages)
+            context.set_evidence(evidence)
+
+            # 提取 sources
+            sources = self._extract_sources(raw_tool_results, evidence)
+            context.set_sources(sources)
+
+            logger.info("[Knowledge] 提取 %d 条 Evidence", len(evidence))
+
         except Exception as e:
             logger.error("[Knowledge] Agent 执行失败: %s", e)
-            context.answer = "抱歉，检索时出现错误，请稍后重试。"
+            context.evidence = []
+            context.sources = []
 
         return context
+
+    def _extract_tool_results(self, messages) -> list[str]:
+        """从消息列表中提取所有工具返回的文本"""
+        results = []
+        for msg in messages:
+            if hasattr(msg, "type") and msg.type == "tool":
+                results.append(msg.content)
+        return results
+
+    def _parse_evidence(self, messages) -> list[Evidence]:
+        """从 LLM 最终输出中解析 Evidence JSON"""
+        # 找到最后一条 AI 消息（非 tool call）
+        logger.warning("[Knowledge] 消息总数: %d", len(messages))
+        for i, msg in enumerate(messages):
+            logger.warning("[Knowledge]   msg[%d] type=%s, has_tool_calls=%s, content_len=%d",
+                           i, getattr(msg, "type", "?"),
+                           bool(getattr(msg, "tool_calls", None)),
+                           len(getattr(msg, "content", "")))
+        for msg in reversed(messages):
+            if hasattr(msg, "type") and msg.type == "ai" and not getattr(msg, "tool_calls", None):
+                content = msg.content
+                return self._extract_evidence_from_text(content)
+        return []
+
+    def _extract_evidence_from_text(self, text: str) -> list[Evidence]:
+        """从文本中提取 Evidence（兼容 markdown 代码块）"""
+        logger.warning("[Knowledge] LLM 原始输出 (前500字符): %s", text[:500])
+        try:
+            # 尝试直接解析
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # 尝试从 markdown 代码块中提取
+            if "```" in text:
+                parts = text.split("```")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("json"):
+                        part = part[4:]
+                    try:
+                        data = json.loads(part.strip())
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    logger.warning("[Knowledge] 无法解析 Evidence JSON")
+                    return []
+            else:
+                # 尝试找到 JSON 块
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end > start:
+                    try:
+                        data = json.loads(text[start:end + 1])
+                    except json.JSONDecodeError:
+                        logger.warning("[Knowledge] 无法解析 Evidence JSON")
+                        return []
+                else:
+                    return []
+
+        raw_evidence = data.get("evidence", [])
+        result = []
+        for item in raw_evidence:
+            if isinstance(item, dict) and "statement" in item:
+                result.append(Evidence(
+                    statement=item.get("statement", ""),
+                    source=item.get("source", ""),
+                    evidence_type=item.get("evidence_type", "text"),
+                    metadata=item.get("metadata", {}),
+                ))
+        return result
+
+    def _extract_sources(self, tool_results: list[str], evidence: list[Evidence]) -> list[dict]:
+        """从工具结果和 evidence 中提取来源信息"""
+        sources = {}
+        for ev in evidence:
+            if ev.source and ev.source not in sources:
+                sources[ev.source] = {
+                    "file_name": ev.source,
+                    "content": ev.statement[:200],
+                }
+        return list(sources.values())

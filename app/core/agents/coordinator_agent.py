@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 CLASSIFY_SYSTEM = """你是一个问题分类器。根据用户问题判断是否需要以下三种处理：
 
 1. needs_plan: 问题需要多步骤执行（跨文档对比、先搜索再计算、多条件筛选等）。简单查询（单次搜索即可回答）为 false。
-2. needs_analysis: 问题需要数值计算（求和、排名、统计、比较大小、排序、加减乘除等）
+2. needs_analysis: 问题需要数值计算（求和、排名、统计、比较大小、排序、加减乘除等）。为 true 时 Analysis Agent 将使用 calculate_sum/calculate_rank 工具。
 3. needs_review: 问题较复杂，需要审核答案质量（分析、对比、总结、建议、评估、趋势、原因探究等）
 
 简单问答（如问候、闲聊、简单的事实查询）三个都是 false。

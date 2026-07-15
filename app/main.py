@@ -13,7 +13,7 @@ from app.core.vector_store import VectorStore
 from app.core.agent_memory import AgentMemory
 from app.core.redis_store import RedisStore
 from app.core.agent_orchestrator import AgentOrchestrator
-from app.mcp_client import MCPClient
+from app.core.mcp.client import MCPClient
 from app.exceptions import BizException, ErrorCode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -31,7 +31,7 @@ async def lifespan(application: FastAPI):
     # 初始化 MCP Client
     mcp_client = MCPClient(
         server_command="python",
-        server_args=["-m", "app.mcp_server"]
+        server_args=["-m", "app.core.mcp.server"]
     )
     await mcp_client.connect()
     application.state.mcp_client = mcp_client

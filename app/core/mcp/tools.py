@@ -1,10 +1,11 @@
 from langchain_core.tools import tool
 
-from app.mcp_client import MCPClient
+from app.core.mcp.client import MCPClient
 
 
-def create_mcp_tools(mcp_client: MCPClient):
-    """创建 LangChain tools，内部通过 MCP Client 调用"""
+def create_mcp_tools(mcp_client: MCPClient, include: list[str] | None = None):
+    """创建 LangChain tools，内部通过 MCP Client 调用。
+    include: 可选，只返回指定名称的工具。"""
 
     @tool
     async def search_documents(query: str, row_start: int = None, row_end: int = None) -> str:
@@ -47,4 +48,7 @@ def create_mcp_tools(mcp_client: MCPClient):
         """读取当前搜索到的文档的全部数据行。当需要完整信息（如列出所有品牌、所有记录、完整清单）时调用。当前 search_documents 只返回部分数据，调用此工具可获取全文。必须先调用 search_documents 才能使用。"""
         return await mcp_client.call_tool("read_all_rows", {})
 
-    return [search_documents, list_documents, calculate_sum, calculate_rank, read_all_rows]
+    all_tools = [search_documents, list_documents, calculate_sum, calculate_rank, read_all_rows]
+    if include:
+        return [t for t in all_tools if t.name in include]
+    return all_tools
