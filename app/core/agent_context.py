@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 
 from app.models.data_types import Evidence, AnalysisResult, CriticResult, AgentTrace
+from app.models.task_graph import TaskGraph
 
 
 @dataclass
@@ -28,7 +29,7 @@ class AgentContext:
     preferences: dict | None = None
 
     # ==================== Coordinator 写入 ====================
-    plan: list[dict] | None = None
+    plan: TaskGraph | None = None
 
     # ==================== Knowledge 写入 ====================
     evidence: list[Evidence] = field(default_factory=list)

@@ -10,6 +10,7 @@ from app.core.rag_engine import RAGEngine
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
 from app.models.data_types import Evidence
+from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,13 @@ class KnowledgeAgent(BaseAgent):
     """知识检索 Agent：检索文档并提取结构化 Evidence"""
 
     name = "Knowledge"
+    capability = AgentCapability(
+        name="knowledge",
+        description="知识检索，搜索文档、提取事实",
+        tools=["search_documents", "list_documents", "read_all_rows"],
+        writes_to=["evidence", "sources"],
+        requires=[],
+    )
 
     def __init__(self, rag_engine: RAGEngine, mcp_client: MCPClient):
         self.engine = rag_engine

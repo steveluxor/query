@@ -35,6 +35,14 @@ async def ask_question(
 
     context = await orchestrator.run(context)
 
+    # plan 序列化：TaskGraph → list[dict]
+    plan = None
+    if context.plan and context.plan.tasks:
+        plan = [
+            {"id": t.id, "agent": t.agent, "objective": t.objective, "depends_on": t.depends_on}
+            for t in context.plan.tasks
+        ]
+
     # 返回 memory_data（Java 会将它写入 Redis）
     memory_data = None
     if context.session_id:
@@ -48,7 +56,7 @@ async def ask_question(
         session_id=context.session_id,
         memory_data=memory_data,
         reflection_count=context.reflection_count,
-        plan=context.plan,
+        plan=plan,
         agent_trace=[
             AgentStepInfo(name=s.name, duration_ms=s.duration_ms, summary=s.summary)
             for s in context.steps

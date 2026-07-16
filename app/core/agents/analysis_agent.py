@@ -9,6 +9,7 @@ from app.core.rag_engine import RAGEngine
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
 from app.models.data_types import AnalysisResult, Calculation
+from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,13 @@ class AnalysisAgent(BaseAgent):
     """数据分析 Agent：通过 MCP 工具执行计算并输出结构化结果"""
 
     name = "Analysis"
+    capability = AgentCapability(
+        name="analysis",
+        description="数据分析，求和、排名",
+        tools=["calculate_sum", "calculate_rank"],
+        writes_to=["analysis"],
+        requires=["evidence"],
+    )
 
     def __init__(self, rag_engine: RAGEngine, mcp_client: MCPClient):
         self.engine = rag_engine

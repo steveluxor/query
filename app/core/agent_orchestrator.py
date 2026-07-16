@@ -12,6 +12,8 @@ from app.core.agent_memory import AgentMemory
 from app.core.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
 from app.core.prompt_manager import PromptManager
+from app.core.agent_registry import create_default_registry
+from app.models.task_graph import TaskGraph, TaskNode
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,11 @@ class AgentOrchestrator:
         self.redis_store = redis_store
         self.mcp_client = mcp_client
 
+        # Agent Registry（能力声明 + 实例绑定）
+        self.registry = create_default_registry()
+        self.registry.register(KnowledgeAgent.capability, self.knowledge_agent)
+        self.registry.register(AnalysisAgent.capability, self.analysis_agent)
+
     async def run(self, context: AgentContext) -> AgentContext:
         # 1. 恢复记忆
         await self._restore_memory(context)
@@ -53,10 +60,10 @@ class AgentOrchestrator:
             await self.coordinator.execute(context)
 
             # 5. 规划模式：复杂问题拆步骤
-            plan = self._plan(context.question, context.memory_context) if self.coordinator.needs_plan else []
+            plan = self._plan(context.question, context.memory_context) if self.coordinator.needs_plan else None
 
-            if plan:
-                logger.info("[Orchestrator] 规划模式触发，共 %d 步", len(plan))
+            if plan and plan.tasks:
+                logger.info("[Orchestrator] 规划模式触发: goal=%s, 共 %d 步", plan.goal, len(plan.tasks))
                 context.plan = plan
                 await self._execute_plan(context, plan)
             else:
@@ -102,14 +109,22 @@ class AgentOrchestrator:
             target = context.retry_target
             context.reset_for_retry(target)
 
-            if target in ("knowledge", "all"):
+            # 规划模式：按 task_id 重跑 DAG 子链
+            if context.plan and target.startswith("task"):
                 context.question = original_question
-                await self.knowledge_agent.execute(context)
+                await self._retry_from_task(context, target)
+            else:
+                # 简单模式：按 agent 类型重跑
+                if target in ("knowledge", "all"):
+                    context.question = original_question
+                    await self.knowledge_agent.execute(context)
 
-            if target in ("analysis", "all") and self.coordinator.needs_analysis:
-                await self.analysis_agent.execute(context)
+                if target in ("analysis", "all") and self.coordinator.needs_analysis:
+                    await self.analysis_agent.execute(context)
 
-            if target in ("generator", "knowledge", "analysis", "all"):
+            if target in ("generator", "knowledge", "analysis", "all", *(
+                [t.id for t in context.plan.tasks] if context.plan and context.plan.tasks else []
+            )):
                 self.answer_generator.generate(context)
 
         if context.need_retry:
@@ -118,38 +133,135 @@ class AgentOrchestrator:
 
         context.question = original_question
 
-    # ==================== 规划模式 ====================
+    async def _retry_from_task(self, context: AgentContext, task_id: str):
+        """从指定 task 开始，重跑该任务及其所有下游依赖"""
+        if not context.plan:
+            return
 
-    async def _execute_plan(self, context: AgentContext, plan: list[dict]):
-        """执行规划模式 — 多步 Evidence 累积"""
-        for i, step in enumerate(plan):
-            agent_type = step.get("agent", "knowledge")
-            query = step.get("query", "")
+        # 找出需要重跑的任务：target task + 所有 transitively dependent tasks
+        task_map = {t.id: t for t in context.plan.tasks}
+        if task_id not in task_map:
+            logger.warning("[Orchestrator] retry 目标 %s 不在 TaskGraph 中", task_id)
+            return
 
-            original_question = context.question
-            # 保存前序步骤累积的 evidence/sources
+        # BFS 找所有下游任务
+        to_retry = set()
+        queue = [task_id]
+        while queue:
+            tid = queue.pop(0)
+            if tid in to_retry:
+                continue
+            to_retry.add(tid)
+            for t in context.plan.tasks:
+                if tid in t.depends_on:
+                    queue.append(t.id)
+
+        # 按拓扑顺序排序后执行
+        retry_tasks = [t for t in context.plan.tasks if t.id in to_retry]
+        retry_tasks.sort(key=lambda t: len(t.depends_on))
+
+        logger.info("[Orchestrator] 从 task %s 重跑 %d 个任务: %s",
+                    task_id, len(retry_tasks), [t.id for t in retry_tasks])
+
+        for task in retry_tasks:
+            context.question = task.objective
             prev_evidence = list(context.evidence)
             prev_sources = list(context.sources)
-            try:
-                context.question = query
-                # 清空字段，允许 agent 重新写入
-                if agent_type == "analysis":
-                    context.analysis = None
-                    await self.analysis_agent.execute(context)
-                else:
-                    context.evidence = []
-                    context.sources = []
-                    await self.knowledge_agent.execute(context)
-            finally:
-                context.question = original_question
 
-            # 累积：将本步新 evidence 追加到前序结果中
-            if agent_type != "analysis":
+            cap = self.registry.get(task.agent)
+            agent = self.registry.get_agent(task.agent)
+
+            # 校验前置条件
+            if cap and cap.requires and not self._check_requires(context, cap.requires):
+                logger.warning("[Orchestrator] 跳过 %s: 缺少前置条件 %s", task.id, cap.requires)
+                task.status = "skipped"
+                continue
+
+            try:
+                if cap:
+                    self._clear_context_fields(context, cap.writes_to)
+                await agent.execute(context, task_id=task.id)
+            finally:
+                context.question = context.question  # restore handled by caller
+
+            if cap and "evidence" not in cap.writes_to:
                 context.evidence = prev_evidence + context.evidence
                 context.sources = prev_sources + context.sources
 
-            logger.info("步骤 %d/%d 完成: %s, 累计 evidence=%d",
-                        i + 1, len(plan), agent_type, len(context.evidence))
+            task.status = "completed"
+            logger.info("[Orchestrator] 重跑步骤 %s 完成, 累计 evidence=%d",
+                        task.id, len(context.evidence))
+
+    # ==================== Agent 调度辅助 ====================
+
+    @staticmethod
+    def _clear_context_fields(context: AgentContext, writes_to: list[str]):
+        """根据 capability.writes_to 清空对应 context 字段"""
+        if "evidence" in writes_to:
+            context.evidence = []
+            context.sources = []
+        if "analysis" in writes_to:
+            context.analysis = None
+
+    @staticmethod
+    def _check_requires(context: AgentContext, requires: list[str]) -> bool:
+        """校验执行前必须存在的 context 字段"""
+        field_values = {
+            "evidence": context.evidence,
+            "analysis": context.analysis,
+            "answer": context.answer,
+        }
+        for field_name in requires:
+            if not field_values.get(field_name):
+                return False
+        return True
+
+    # ==================== 规划模式 ====================
+
+    async def _execute_plan(self, context: AgentContext, plan: TaskGraph):
+        """执行规划模式 — 按依赖拓扑执行任务图"""
+        original_question = context.question
+        completed_ids = set()
+        pending = list(plan.tasks)
+
+        while pending:
+            ready = [t for t in pending if all(d in completed_ids for d in t.depends_on)]
+            if not ready:
+                logger.warning("[Orchestrator] 依赖环或无效依赖，跳过剩余 %d 个任务", len(pending))
+                break
+
+            for task in ready:
+                context.question = task.objective
+                prev_evidence = list(context.evidence)
+                prev_sources = list(context.sources)
+
+                cap = self.registry.get(task.agent)
+                agent = self.registry.get_agent(task.agent)
+
+                # 校验前置条件
+                if cap and cap.requires and not self._check_requires(context, cap.requires):
+                    logger.warning("[Orchestrator] 跳过 %s: 缺少前置条件 %s", task.id, cap.requires)
+                    task.status = "skipped"
+                    completed_ids.add(task.id)
+                    pending.remove(task)
+                    continue
+
+                try:
+                    if cap:
+                        self._clear_context_fields(context, cap.writes_to)
+                    await agent.execute(context, task_id=task.id)
+                finally:
+                    context.question = original_question
+
+                if cap and "evidence" not in cap.writes_to:
+                    context.evidence = prev_evidence + context.evidence
+                    context.sources = prev_sources + context.sources
+
+                completed_ids.add(task.id)
+                pending.remove(task)
+
+                logger.info("步骤 %s 完成: %s, 累计 evidence=%d",
+                            task.id, task.objective, len(context.evidence))
 
         self.answer_generator.generate(context)
 
@@ -164,8 +276,9 @@ class AgentOrchestrator:
             text = text.strip()
         return json.loads(text)
 
-    def _plan(self, question: str, memory_context: str | None = None) -> list[dict]:
+    def _plan(self, question: str, memory_context: str | None = None) -> TaskGraph | None:
         prompt = PromptManager.get("planner", "system")
+        prompt = prompt.replace("{available_agents}", self.registry.format_for_prompt())
         doc_names = self.rag_engine.vector_store.get_document_names()
         if doc_names:
             doc_list = "\n".join(f"- [{did}] {name}" for did, name in sorted(doc_names.items()))
@@ -176,22 +289,54 @@ class AgentOrchestrator:
 
         try:
             result = self.rag_engine.llm.invoke([("human", prompt)])
-            plan = self._parse_json(result.content)
-            if not isinstance(plan, list):
-                return []
-            return [self._normalize_step(s) for s in plan]
+            data = self._parse_json(result.content)
+            if isinstance(data, list):
+                return self._list_to_task_graph(data)
+            if isinstance(data, dict) and "tasks" in data:
+                plan = self._parse_task_graph(data)
+                if plan and self._validate_task_graph(plan):
+                    return plan
+            return None
         except Exception:
-            return []
+            return None
 
     @staticmethod
-    def _normalize_step(step) -> dict:
-        if isinstance(step, dict):
-            return step
-        text = str(step).strip()
-        lower = text.lower()
-        if any(kw in lower for kw in ("calculate_sum", "calculate_rank")):
-            return {"agent": "analysis", "query": text}
-        return {"agent": "knowledge", "query": text}
+    def _parse_task_graph(data: dict) -> TaskGraph | None:
+        tasks = []
+        for t in data.get("tasks", []):
+            tasks.append(TaskNode(
+                id=t.get("id", ""),
+                agent=t.get("agent", "knowledge"),
+                objective=t.get("objective", ""),
+                depends_on=t.get("depends_on", []),
+                output_key=t.get("output_key", ""),
+            ))
+        return TaskGraph(goal=data.get("goal", ""), tasks=tasks) if tasks else None
+
+    @staticmethod
+    def _list_to_task_graph(items: list) -> TaskGraph | None:
+        """兼容旧 flat list 格式：无依赖，顺序执行"""
+        tasks = []
+        for i, item in enumerate(items):
+            step = item if isinstance(item, dict) else {"query": str(item)}
+            agent = step.get("agent", "knowledge")
+            query = step.get("query", "")
+            lower = query.lower() if query else ""
+            if any(kw in lower for kw in ("calculate_sum", "calculate_rank")):
+                agent = "analysis"
+            tasks.append(TaskNode(
+                id=f"task{i + 1}",
+                agent=agent,
+                objective=query,
+                depends_on=[f"task{i}"] if i > 0 else [],
+            ))
+        return TaskGraph(goal="", tasks=tasks) if tasks else None
+
+    def _validate_task_graph(self, plan: TaskGraph) -> bool:
+        errors = self.registry.validate_dag(plan)
+        for err in errors:
+            logger.warning("[Orchestrator] DAG 校验失败: %s", err)
+        return len(errors) == 0
 
     # ==================== 记忆管理 ====================
 

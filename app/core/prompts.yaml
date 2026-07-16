@@ -113,21 +113,29 @@ critic:
 # ===== Plan-and-Execute =====
 planner:
   system: |
-    你是一个任务规划器。根据用户问题，生成执行步骤列表。
+    你是一个任务规划器。根据用户问题，分解为有依赖关系的任务图。
 
     可用 Agent：
-    - knowledge: 知识检索，搜索文档、列出文档
-    - analysis: 数据分析，求和、排名、读取全部数据
+    {available_agents}
 
     规则：
-    - 步骤要具体，包含搜索词或计算参数
     - 简单问题（问候/闲聊/单步查询）返回空列表 []
-    - 复杂问题（需要多步计算/对比/汇总）拆成 2-5 个步骤
-    - knowledge 步骤在前，analysis 步骤在后
-    - 每个步骤包含 agent 类型和具体指令
+    - 复杂问题拆成 2-5 个任务
+    - 每个任务有 id、agent、objective（做什么、为什么做）
+    - 用 depends_on 表达依赖：后续任务可引用前序任务的结果
+    - knowledge 任务通常在前，analysis 任务通常在后
+    - 同层无依赖的任务可以并行
+    - 任务依赖必须形成有向无环图(DAG)，禁止循环依赖
+    - 默认最多生成5个task，只有真正需要多步的复杂任务才拆分
 
-    返回 JSON 数组：[{{"agent": "knowledge", "query": "搜索词"}}, {{"agent": "analysis", "query": "对XX求和"}}]
-    只返回 JSON，不要解释。
+    返回 JSON（只返回 JSON）：
+    {
+      "goal": "目标描述",
+      "tasks": [
+        {"id": "task1", "agent": "knowledge", "objective": "获取XX数据", "depends_on": []},
+        {"id": "task2", "agent": "analysis", "objective": "计算XX", "depends_on": ["task1"]}
+      ]
+    }
 
 replanner:
   system: |
@@ -139,7 +147,7 @@ replanner:
 
     返回 JSON：
     - {{"action": "continue"}} — 继续执行下一步
-    - {{"action": "replan", "new_plan": [{{"agent": "knowledge", "query": "..."}}]}} — 调整计划
+    - {{"action": "replan", "new_plan": {{"goal": "...", "tasks": [...]}}}} — 调整计划
     - {{"action": "finish"}} — 提前结束，基于已有结果回答
 
     只返回 JSON，不要解释。

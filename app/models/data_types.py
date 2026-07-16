@@ -43,7 +43,8 @@ class CriticResult:
 @dataclass
 class AgentTrace:
     """单个 Agent 的执行轨迹"""
-    agent: str                          # "Knowledge" / "Analysis" / "Generator" / "Critic"
+    task_id: str = ""                   # 关联 TaskGraph 中的任务 ID
+    agent: str = ""                     # "Knowledge" / "Analysis" / "Generator" / "Critic"
     start_time: str = ""
     end_time: str = ""
     tools_called: list[str] = field(default_factory=list)
