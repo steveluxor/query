@@ -2,7 +2,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 
 from app.config import settings
@@ -44,14 +43,8 @@ class RAGEngine:
 
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0.1,
-            max_tokens=4096,
-            timeout=30,
-        )
+        from app.core.llm_factory import create_llm
+        self.llm = create_llm()
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除
     SCORE_THRESHOLD = 0.92

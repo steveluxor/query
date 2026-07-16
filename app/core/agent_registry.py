@@ -53,6 +53,8 @@ class AgentRegistry:
         errors = []
         ids = {t.id for t in plan.tasks}
 
+        # 第一步：基础校验（agent 注册 + 依赖存在性）
+        invalid_deps = set()
         for task in plan.tasks:
             cap = self._capabilities.get(task.agent)
             if not cap:
@@ -62,15 +64,41 @@ class AgentRegistry:
             for dep in task.depends_on:
                 if dep not in ids:
                     errors.append(f"依赖不存在: {task.id} -> {dep}")
+                    invalid_deps.add(dep)
 
-        # 输出冲突检测：同层任务写同一字段
-        # 按 depends_on 深度分层
+        # 第二步：循环检测（拓扑排序）— 必须在深度计算之前
+        in_degree = {t.id: 0 for t in plan.tasks}
+        graph = {t.id: [] for t in plan.tasks}
+        for t in plan.tasks:
+            for dep in t.depends_on:
+                if dep in invalid_deps:
+                    continue
+                graph[dep].append(t.id)
+                in_degree[t.id] += 1
+
+        queue = [tid for tid, deg in in_degree.items() if deg == 0]
+        visited = 0
+        while queue:
+            node = queue.pop(0)
+            visited += 1
+            for neighbor in graph[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        if visited != len(plan.tasks):
+            errors.append("检测到循环依赖")
+            return errors  # 有循环时跳过后续校验，避免深度计算无限循环
+
+        # 第三步：输出冲突检测（按 depends_on 深度分层）
         depth = {t.id: 0 for t in plan.tasks}
         changed = True
         while changed:
             changed = False
             for t in plan.tasks:
                 for dep in t.depends_on:
+                    if dep in invalid_deps:
+                        continue
                     if depth[t.id] <= depth[dep]:
                         depth[t.id] = depth[dep] + 1
                         changed = True
@@ -90,27 +118,6 @@ class AgentRegistry:
             for field, writers in writes_in_layer.items():
                 if len(writers) > 1:
                     errors.append(f"输出冲突: {writers} 都写入 '{field}'")
-
-        # 循环检测：拓扑排序
-        in_degree = {t.id: 0 for t in plan.tasks}
-        graph = {t.id: [] for t in plan.tasks}
-        for t in plan.tasks:
-            for dep in t.depends_on:
-                graph[dep].append(t.id)
-                in_degree[t.id] += 1
-
-        queue = [tid for tid, deg in in_degree.items() if deg == 0]
-        visited = 0
-        while queue:
-            node = queue.pop(0)
-            visited += 1
-            for neighbor in graph[node]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        if visited != len(plan.tasks):
-            errors.append("检测到循环依赖")
 
         return errors
 

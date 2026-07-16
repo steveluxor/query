@@ -1,4 +1,5 @@
 import logging
+import os
 
 from contextlib import asynccontextmanager
 
@@ -15,8 +16,9 @@ from app.core.redis_store import RedisStore
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.mcp.client import MCPClient
 from app.exceptions import BizException, ErrorCode
+from app.core.log_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+setup_logging()
 
 
 @asynccontextmanager
@@ -58,9 +60,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:8080").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

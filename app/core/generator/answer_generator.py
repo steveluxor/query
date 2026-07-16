@@ -1,7 +1,5 @@
 import logging
 
-from langchain_openai import ChatOpenAI
-
 from app.config import settings
 from app.core.agent_context import AgentContext
 from app.models.data_types import AgentTrace
@@ -21,14 +19,8 @@ class AnswerGenerator:
     """答案生成器：基于 evidence + analysis 统一生成最终自然语言回答"""
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0.1,
-            max_tokens=4096,
-            timeout=30,
-        )
+        from app.core.llm_factory import create_llm
+        self.llm = create_llm()
 
     def generate(self, context: AgentContext) -> None:
         """基于 context 中的 evidence 和 analysis 生成最终 answer"""

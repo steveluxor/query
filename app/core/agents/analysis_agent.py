@@ -53,14 +53,14 @@ class AnalysisAgent(BaseAgent):
         tools=["calculate_sum", "calculate_rank"],
         writes_to=["analysis"],
         requires=["evidence"],
+        reset_fields=["analysis"],
     )
 
-    def __init__(self, rag_engine: RAGEngine, mcp_client: MCPClient):
+    def __init__(self, rag_engine: RAGEngine):
         self.engine = rag_engine
-        self.mcp_client = mcp_client
 
-    async def run(self, context: AgentContext) -> AgentContext:
-        tools = create_mcp_tools(self.mcp_client, include=["calculate_sum", "calculate_rank"])
+    async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "") -> AgentContext:
+        tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["calculate_sum", "calculate_rank"])
 
         system_prompt = ANALYSIS_SYSTEM_PROMPT
 
@@ -103,32 +103,10 @@ class AnalysisAgent(BaseAgent):
     def _extract_analysis_from_text(self, text: str) -> AnalysisResult:
         """从文本中提取 AnalysisResult"""
         logger.warning("[Analysis] LLM 原始输出 (前500字符): %s", text[:500])
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            if "```" in text:
-                parts = text.split("```")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:]
-                    try:
-                        data = json.loads(part.strip())
-                        break
-                    except json.JSONDecodeError:
-                        continue
-                else:
-                    return AnalysisResult()
-            else:
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end > start:
-                    try:
-                        data = json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        return AnalysisResult()
-                else:
-                    return AnalysisResult()
+        from app.core.utils import extract_json
+        data = extract_json(text)
+        if data is None or not isinstance(data, dict):
+            return AnalysisResult()
 
         calculations = []
         for item in data.get("calculations", []):

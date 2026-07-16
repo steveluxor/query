@@ -76,35 +76,41 @@ class AgentMemory:
 
     def __init__(self, max_sessions: int = 1000, idle_ttl: int = 1800):
         self._sessions: dict[str, SessionMemory] = {}
+        self._lock = threading.RLock()
         self._max_sessions = max_sessions
         self._idle_ttl = idle_ttl
 
         # 缓存 LLM 实例，避免每次重写都创建新的
-        from langchain_openai import ChatOpenAI
-        self._summary_llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0.1,
-            max_tokens=256,
-            timeout=30,
-        )
+        from app.core.llm_factory import create_llm
+        self._summary_llm = create_llm(temperature=0.1, max_tokens=256)
 
     # ==================== 公开接口 ====================
 
+    def has_session(self, session_id: str) -> bool:
+        """检查 session 是否已存在"""
+        with self._lock:
+            return session_id in self._sessions
+
+    def restore_session(self, session_id: str, other: "AgentMemory") -> None:
+        """从另一个 AgentMemory 恢复 session（Redis 加载后使用）"""
+        with self._lock, other._lock:
+            if session_id in other._sessions:
+                self._sessions[session_id] = other._sessions[session_id]
+
     def get_or_create(self, session_id: str) -> SessionMemory:
         """懒加载：不存在则创建记忆对象"""
-        self._evict_if_needed()
-        now = time.time()
-        if session_id not in self._sessions:
-            self._sessions[session_id] = SessionMemory(
-                session_id=session_id,
-                created_at=now,
-                last_accessed=now,
-            )
-            logger.info("AgentMemory 创建 session: %s", session_id)
-        self._sessions[session_id].last_accessed = time.time()
-        return self._sessions[session_id]
+        with self._lock:
+            self._evict_if_needed()
+            now = time.time()
+            if session_id not in self._sessions:
+                self._sessions[session_id] = SessionMemory(
+                    session_id=session_id,
+                    created_at=now,
+                    last_accessed=now,
+                )
+                logger.info("AgentMemory 创建 session: %s", session_id)
+            self._sessions[session_id].last_accessed = time.time()
+            return self._sessions[session_id]
 
     def rebuild_from_history(self, session_id: str, history: list[dict],
                              preferences: dict | None = None) -> None:
@@ -147,7 +153,8 @@ class AgentMemory:
         """将 AgentMemory 序列化为 dict（供 response 返回 → Java 写 Redis）
         仅当数据有变化（dirty）时返回，否则返回 None 跳过 Redis 写入。
         """
-        memory = self._sessions.get(session_id)
+        with self._lock:
+            memory = self._sessions.get(session_id)
         if not memory:
             return None
         if not memory._dirty:
@@ -205,7 +212,8 @@ class AgentMemory:
     @staticmethod
     def _from_memory(session_id: str, memory: SessionMemory) -> "AgentMemory":
         am = AgentMemory()
-        am._sessions[session_id] = memory
+        with am._lock:
+            am._sessions[session_id] = memory
         return am
 
     def update(self, session_id: str, turn: dict) -> None:
@@ -250,7 +258,8 @@ class AgentMemory:
 
     def update_preferences(self, session_id: str, question: str) -> None:
         """独立的偏好检测方法，供 qa.py 与主生成 LLM 并行调用"""
-        memory = self._sessions.get(session_id)
+        with self._lock:
+            memory = self._sessions.get(session_id)
         if not memory:
             return
         if not memory.preferences:
@@ -267,7 +276,8 @@ class AgentMemory:
           ↓
           用户偏好(memory.preferences)
         """
-        memory = self._sessions.get(session_id)
+        with self._lock:
+            memory = self._sessions.get(session_id)
         if not memory:
             return ""
         parts = []
@@ -337,11 +347,11 @@ class AgentMemory:
 
     def _evict_if_needed(self) -> None:
         now = time.time()
-        # 超时空闲淘汰
+        # 超时空闲淘汰（先收集再删除，避免迭代时修改 dict）
         idle = [sid for sid, m in self._sessions.items()
                 if now - m.last_accessed > self._idle_ttl]
         for sid in idle:
-            self._sessions.pop(sid, None)
+            del self._sessions[sid]
         if idle:
             logger.info("AgentMemory 空闲淘汰 %d 个 session", len(idle))
 
@@ -350,7 +360,7 @@ class AgentMemory:
         if over > 0:
             sorted_items = sorted(self._sessions.items(), key=lambda x: x[1].last_accessed)
             for sid, _ in sorted_items[:over]:
-                self._sessions.pop(sid, None)
+                del self._sessions[sid]
             logger.info("AgentMemory LRU 淘汰 %d 个 session", over)
 
     def _compress_summary(self, memory: SessionMemory, question: str, answer: str) -> None:
@@ -478,10 +488,9 @@ class AgentMemory:
         try:
             resp = llm.invoke(prompt)
             text = resp.content.strip()
-            start_idx = text.find("{")
-            end_idx = text.rfind("}")
-            if start_idx != -1 and end_idx > start_idx:
-                data = json.loads(text[start_idx:end_idx + 1])
+            from app.core.utils import extract_json
+            data = extract_json(text)
+            if data and isinstance(data, dict):
                 summary = data.get("summary", "").replace("\n", " ")
                 prefs = data.get("preferences", {})
                 if not isinstance(prefs, dict):
@@ -559,12 +568,10 @@ class AgentMemory:
         try:
             resp = llm.invoke(prompt)
             text = resp.content.strip()
-            start_idx = text.find("{")
-            end_idx = text.rfind("}")
-            if start_idx != -1 and end_idx > start_idx:
-                new_prefs = json.loads(text[start_idx:end_idx + 1])
-                if not isinstance(new_prefs, dict):
-                    return
+            from app.core.utils import extract_json
+            new_prefs = extract_json(text)
+            if not isinstance(new_prefs, dict):
+                return
                 with memory.lock:
                     deleted_keys = [k for k, v in new_prefs.items()
                                     if v is None and k in memory.preferences]

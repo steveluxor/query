@@ -58,16 +58,16 @@ class KnowledgeAgent(BaseAgent):
         tools=["search_documents", "list_documents", "read_all_rows"],
         writes_to=["evidence", "sources"],
         requires=[],
+        reset_fields=["evidence", "sources"],
     )
 
-    def __init__(self, rag_engine: RAGEngine, mcp_client: MCPClient):
+    def __init__(self, rag_engine: RAGEngine):
         self.engine = rag_engine
-        self.mcp_client = mcp_client
 
     MAX_HISTORY_TURNS = 5
 
-    async def run(self, context: AgentContext) -> AgentContext:
-        tools = create_mcp_tools(self.mcp_client, include=["search_documents", "list_documents", "read_all_rows"])
+    async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "") -> AgentContext:
+        tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["search_documents", "list_documents", "read_all_rows"])
 
         system_prompt = KNOWLEDGE_SYSTEM_PROMPT
 
@@ -145,39 +145,12 @@ class KnowledgeAgent(BaseAgent):
     def _extract_evidence_from_text(self, text: str) -> list[Evidence]:
         """从文本中提取 Evidence（兼容 markdown 代码块）"""
         logger.warning("[Knowledge] LLM 原始输出 (前500字符): %s", text[:500])
-        try:
-            # 尝试直接解析
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            # 尝试从 markdown 代码块中提取
-            if "```" in text:
-                parts = text.split("```")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:]
-                    try:
-                        data = json.loads(part.strip())
-                        break
-                    except json.JSONDecodeError:
-                        continue
-                else:
-                    logger.warning("[Knowledge] 无法解析 Evidence JSON")
-                    return []
-            else:
-                # 尝试找到 JSON 块
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end > start:
-                    try:
-                        data = json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        logger.warning("[Knowledge] 无法解析 Evidence JSON")
-                        return []
-                else:
-                    return []
+        from app.core.utils import extract_json
+        data = extract_json(text)
+        if data is None:
+            return []
 
-        raw_evidence = data.get("evidence", [])
+        raw_evidence = data.get("evidence", []) if isinstance(data, dict) else []
         result = []
         for item in raw_evidence:
             if isinstance(item, dict) and "statement" in item:

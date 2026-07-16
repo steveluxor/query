@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # RabbitMQ
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672
-    rabbitmq_user: str = "guest"
-    rabbitmq_password: str = "guest"
+    rabbitmq_user: str = ""
+    rabbitmq_password: str = ""
     rabbitmq_vhost: str = "/"
     rabbitmq_ingest_exchange: str = "ingest.exchange"
     rabbitmq_ingest_queue: str = "ingest.queue"
@@ -33,8 +33,8 @@ class Settings(BaseSettings):
 
     # MinIO
     minio_endpoint: str = "http://localhost:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
     minio_bucket: str = "rag-knowledge"
 
     # Python AI 服务（自引用，用于内部调用）

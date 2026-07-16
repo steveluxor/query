@@ -11,3 +11,4 @@ class AgentCapability:
     tools: list[str] = field(default_factory=list)
     writes_to: list[str] = field(default_factory=list)   # 写入 AgentContext 的哪些字段
     requires: list[str] = field(default_factory=list)    # 执行前必须存在的 context 字段
+    reset_fields: list[str] = field(default_factory=list) # 重试时需清空的字段

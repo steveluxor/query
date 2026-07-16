@@ -3,8 +3,9 @@ from langchain_core.tools import tool
 from app.core.mcp.client import MCPClient
 
 
-def create_mcp_tools(mcp_client: MCPClient, include: list[str] | None = None):
+def create_mcp_tools(mcp_client: MCPClient, session_id: str = "", include: list[str] | None = None):
     """创建 LangChain tools，内部通过 MCP Client 调用。
+    session_id: per-request 隔离标识，自动注入到每个 tool 调用。
     include: 可选，只返回指定名称的工具。"""
 
     @tool
@@ -15,12 +16,12 @@ def create_mcp_tools(mcp_client: MCPClient, include: list[str] | None = None):
             "query": query,
             "row_start": row_start,
             "row_end": row_end,
-        })
+        }, session_id=session_id)
 
     @tool
     async def list_documents() -> str:
         """列出当前知识库中可检索的文档数量和名称。当用户问"有多少文件"、"能搜到几个文档"、"有哪些文档"等元信息问题时调用。"""
-        return await mcp_client.call_tool("list_documents", {})
+        return await mcp_client.call_tool("list_documents", {}, session_id=session_id)
 
     @tool
     async def calculate_sum(key_name: str, row_filter: str = "", content_filter: str = "") -> str:
@@ -30,7 +31,7 @@ def create_mcp_tools(mcp_client: MCPClient, include: list[str] | None = None):
             "key_name": key_name,
             "row_filter": row_filter,
             "content_filter": content_filter,
-        })
+        }, session_id=session_id)
 
     @tool
     async def calculate_rank(key_name: str, ascending: bool, position: int = 1, content_filter: str = "") -> str:
@@ -41,12 +42,12 @@ def create_mcp_tools(mcp_client: MCPClient, include: list[str] | None = None):
             "ascending": ascending,
             "position": position,
             "content_filter": content_filter,
-        })
+        }, session_id=session_id)
 
     @tool
     async def read_all_rows() -> str:
         """读取当前搜索到的文档的全部数据行。当需要完整信息（如列出所有品牌、所有记录、完整清单）时调用。当前 search_documents 只返回部分数据，调用此工具可获取全文。必须先调用 search_documents 才能使用。"""
-        return await mcp_client.call_tool("read_all_rows", {})
+        return await mcp_client.call_tool("read_all_rows", {}, session_id=session_id)
 
     all_tools = [search_documents, list_documents, calculate_sum, calculate_rank, read_all_rows]
     if include:

@@ -1,8 +1,6 @@
 import json
 import logging
 
-from langchain_openai import ChatOpenAI
-
 from app.config import settings
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
@@ -53,13 +51,8 @@ class CriticAgent(BaseAgent):
     name = "Critic"
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model_name,
-            temperature=0,
-            timeout=30,
-        )
+        from app.core.llm_factory import create_llm
+        self.llm = create_llm(temperature=0)
 
     async def run(self, context: AgentContext) -> AgentContext:
         import time
@@ -72,7 +65,8 @@ class CriticAgent(BaseAgent):
             critic_result = self._parse_result(result.content)
         except Exception as e:
             logger.warning("[Critic] LLM 调用失败: %s", e)
-            critic_result = CriticResult(score=10, need_retry=False)
+            critic_result = CriticResult(score=0, need_retry=True, retry_target="all",
+                                          problems=[f"Critic 调用失败: {e}"])
 
         context.set_critique(
             critique=json.dumps(critic_result.problems, ensure_ascii=False) if critic_result.problems else "",
@@ -140,32 +134,11 @@ class CriticAgent(BaseAgent):
 
     def _parse_result(self, text: str) -> CriticResult:
         """解析 CriticResult JSON"""
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            if "```" in text:
-                parts = text.split("```")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:]
-                    try:
-                        data = json.loads(part.strip())
-                        break
-                    except json.JSONDecodeError:
-                        continue
-                else:
-                    return CriticResult(score=10, need_retry=False)
-            else:
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end > start:
-                    try:
-                        data = json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        return CriticResult(score=10, need_retry=False)
-                else:
-                    return CriticResult(score=10, need_retry=False)
+        from app.core.utils import extract_json
+        data = extract_json(text)
+        if data is None or not isinstance(data, dict):
+            return CriticResult(score=0, need_retry=True, retry_target="all",
+                                problems=["Critic 输出解析失败"])
 
         return CriticResult(
             score=data.get("score", 10),

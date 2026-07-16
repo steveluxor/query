@@ -22,6 +22,7 @@ class AgentContext:
     # ==================== 输入 ====================
     question: str
     session_id: str | None = None
+    mcp_session_id: str = ""  # MCP session 隔离标识（per-request UUID）
     document_ids: list[int] | None = None
     history: list[dict] | None = None
     memory_context: str | None = None
@@ -53,9 +54,6 @@ class AgentContext:
     start_time: float = field(default_factory=time.time)
 
     # ==================== 兼容字段（内部使用） ====================
-    knowledge_chunks: list = field(default_factory=list)
-    knowledge_filtered: list = field(default_factory=list)
-    knowledge_all_chunks: list = field(default_factory=list)
     tools_called: list[str] = field(default_factory=list)
     is_agg: bool = False
 
@@ -77,9 +75,13 @@ class AgentContext:
         self.analysis = analysis
 
     def set_answer(self, answer: str):
+        if self.answer:
+            raise RuntimeError("Answer already exists — only Generator can write this")
         self.answer = answer
 
     def set_critique(self, critique: str, need_retry: bool = False, retry_target: str = "all"):
+        if self.critique:
+            raise RuntimeError("Critique already exists — only Critic can write this")
         self.critique = critique
         self.need_retry = need_retry
         self.retry_target = retry_target
@@ -87,24 +89,3 @@ class AgentContext:
     def add_trace(self, trace: AgentTrace):
         self.traces.append(trace)
 
-    # ==================== 重试时清空（Orchestrator 调用） ====================
-
-    def reset_for_retry(self, target: str):
-        """根据 retry_target 清空对应字段，允许重新写入"""
-        if target in ("knowledge", "all"):
-            self.evidence = []
-            self.sources = []
-            self.knowledge_chunks = []
-            self.knowledge_filtered = []
-            self.knowledge_all_chunks = []
-        if target in ("analysis", "all"):
-            self.analysis = None
-        if target in ("generator", "all"):
-            self.answer = ""
-        if target in ("all"):
-            self.is_agg = False
-            self.tools_called = []
-        # Critic 字段每次重试前清空
-        self.critique = ""
-        self.need_retry = False
-        self.retry_target = "all"

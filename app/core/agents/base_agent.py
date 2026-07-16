@@ -16,15 +16,15 @@ class BaseAgent(ABC):
     capability: AgentCapability | None = None
 
     @abstractmethod
-    async def run(self, context: AgentContext) -> AgentContext:
+    async def run(self, context: AgentContext, **kwargs) -> AgentContext:
         ...
 
-    async def execute(self, context: AgentContext, task_id: str = "") -> AgentContext:
+    async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> AgentContext:
         """包装 run()，添加计时、日志和执行轨迹"""
         start = time.time()
         logger.info("[%s] 开始执行 (task=%s)", self.name, task_id or "-")
         try:
-            context = await self.run(context)
+            context = await self.run(context, **kwargs)
             duration = int((time.time() - start) * 1000)
             context.steps.append(AgentStep(
                 name=self.name,
