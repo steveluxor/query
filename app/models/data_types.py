@@ -5,6 +5,16 @@ from typing import Any
 
 
 @dataclass
+class AgentOutput:
+    """Agent 输出数据条目 — 带元数据的数据交换单位"""
+    value: Any
+    producer: str = ""           # 生产者 Agent 名称
+    version: int = 1             # 写入次数（自动递增）
+    timestamp: float = 0.0       # 写入时间（自动记录）
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class Evidence:
     """Knowledge Agent 提取的事实证据"""
     statement: str          # "2024年A产品销量70万"
@@ -38,6 +48,17 @@ class CriticResult:
     problems: list[str] = field(default_factory=list)
     need_retry: bool = False
     retry_target: str = "all"           # "knowledge" / "analysis" / "generator" / "all"
+
+
+@dataclass
+class RetrievalReport:
+    """Knowledge Agent 的检索完整性报告"""
+    sources: list[str] = field(default_factory=list)        # 搜索到的文档名列表
+    total_chunks: int = 0                                    # 命中文档的全量 chunk 数
+    returned_chunks: int = 0                                 # 实际返回到 selected 的 chunk 数
+    is_complete: bool = False                                # 数据是否完整（read_all_rows 已调 = True）
+    read_all_rows_called: bool = False                       # 是否调用了 read_all_rows
+    searches_performed: int = 0                              # 搜索次数
 
 
 @dataclass

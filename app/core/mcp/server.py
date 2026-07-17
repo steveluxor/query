@@ -115,7 +115,7 @@ async def calculate_rank(session_id: str, key_name: str, ascending: bool, positi
 
 @mcp.tool()
 async def read_all_rows(session_id: str) -> str:
-    """读取当前搜索到的文档的全部数据行。当需要完整信息（如列出所有品牌、所有记录、完整清单）时调用。当前 search_documents 只返回部分数据，调用此工具可获取全文。必须先调用 search_documents 才能使用。"""
+    """读取当前搜索到的文档的全部内容。当需要所有章节、所有记录、完整文本时调用。适用于所有文档类型（Word、Excel、PDF 等）。search_documents 只返回部分数据片段，调用此工具可获取全文。必须先调用 search_documents 才能使用。"""
     logger.info("[MCP] read_all_rows (session=%s)", session_id[:8])
 
     session = await session_mgr.get(session_id)

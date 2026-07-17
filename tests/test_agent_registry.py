@@ -1,4 +1,4 @@
-"""AgentRegistry 单元测试 — 注册 + DAG 校验"""
+"""AgentRegistry 单元测试 — 注册 + Agent 能力校验"""
 import pytest
 
 from app.core.agent_registry import AgentRegistry
@@ -11,8 +11,8 @@ def _make_cap(name: str, tools=None, writes_to=None, requires=None) -> AgentCapa
         name=name,
         description=f"{name} agent",
         tools=tools or [],
-        writes_to=writes_to or [],
-        requires=requires or [],
+        inputs=requires or [],
+        outputs={k: str for k in (writes_to or [])},
     )
 
 
@@ -85,7 +85,7 @@ class TestFindByWrites:
         assert reg.find_by_writes("answer") == []
 
 
-class TestValidateDAG:
+class TestValidateCapabilities:
     def test_valid_dag(self):
         reg = AgentRegistry()
         reg.register(_make_cap("knowledge", writes_to=["evidence"]))
@@ -98,7 +98,8 @@ class TestValidateDAG:
                 TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
             ],
         )
-        errors = reg.validate_dag(plan)
+        layers = {"t1": 0, "t2": 1}
+        errors = reg.validate_capabilities(plan, layers)
         assert errors == []
 
     def test_unregistered_agent(self):
@@ -107,34 +108,39 @@ class TestValidateDAG:
             goal="test",
             tasks=[TaskNode(id="t1", agent="unknown", objective="??")],
         )
-        errors = reg.validate_dag(plan)
+        layers = {"t1": 0}
+        errors = reg.validate_capabilities(plan, layers)
         assert any("未注册" in e for e in errors)
 
-    def test_missing_dependency(self):
+    def test_missing_input(self):
         reg = AgentRegistry()
-        reg.register(_make_cap("knowledge"))
+        reg.register(_make_cap("analysis", requires=["evidence"]))
         plan = TaskGraph(
             goal="test",
-            tasks=[TaskNode(id="t1", agent="knowledge", objective="q", depends_on=["nonexistent"])],
+            tasks=[TaskNode(id="t1", agent="analysis", objective="分析")],
         )
-        errors = reg.validate_dag(plan)
-        assert any("依赖不存在" in e for e in errors)
+        layers = {"t1": 0}
+        errors = reg.validate_capabilities(plan, layers)
+        assert any("缺少输入" in e for e in errors)
 
-    def test_cycle_detection(self):
+    def test_input_satisfied(self):
         reg = AgentRegistry()
-        reg.register(_make_cap("a"))
-        reg.register(_make_cap("b"))
+        reg.register(_make_cap("knowledge", writes_to=["evidence"]))
+        reg.register(_make_cap("analysis", writes_to=["analysis"], requires=["evidence"]))
+
         plan = TaskGraph(
             goal="test",
             tasks=[
-                TaskNode(id="t1", agent="a", objective="a", depends_on=["t2"]),
-                TaskNode(id="t2", agent="b", objective="b", depends_on=["t1"]),
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
             ],
         )
-        errors = reg.validate_dag(plan)
-        assert any("循环依赖" in e for e in errors)
+        layers = {"t1": 0, "t2": 1}
+        errors = reg.validate_capabilities(plan, layers)
+        assert not any("缺少输入" in e for e in errors)
 
-    def test_output_conflict_same_layer(self):
+    def test_output_conflict_same_layer_allowed(self):
+        """同层输出冲突不再报错，因为 set_output 已按 task_id 隔离"""
         reg = AgentRegistry()
         reg.register(_make_cap("knowledge", writes_to=["evidence"]))
         reg.register(_make_cap("another", writes_to=["evidence"]))
@@ -145,8 +151,9 @@ class TestValidateDAG:
                 TaskNode(id="t2", agent="another", objective="a"),
             ],
         )
-        errors = reg.validate_dag(plan)
-        assert any("输出冲突" in e for e in errors)
+        layers = {"t1": 0, "t2": 0}
+        errors = reg.validate_capabilities(plan, layers)
+        assert not any("输出冲突" in e for e in errors)
 
     def test_output_conflict_different_layers_ok(self):
         reg = AgentRegistry()
@@ -159,8 +166,8 @@ class TestValidateDAG:
                 TaskNode(id="t2", agent="another", objective="a", depends_on=["t1"]),
             ],
         )
-        errors = reg.validate_dag(plan)
-        # Different layers — no conflict
+        layers = {"t1": 0, "t2": 1}
+        errors = reg.validate_capabilities(plan, layers)
         assert not any("输出冲突" in e for e in errors)
 
 

@@ -49,13 +49,12 @@ async def ask_question(
         memory_data = agent_memory.to_dict(context.session_id)
 
     return MultiAgentResponse(
-        answer=context.answer,
-        sources=[Source(**s) for s in context.sources],
+        answer=context.get_output("answer") or "",
+        sources=[Source(**s) for s in (context.get_output("sources") or [])],
         is_agg=context.is_agg,
         tools_called=context.tools_called,
         session_id=context.session_id,
         memory_data=memory_data,
-        reflection_count=context.reflection_count,
         plan=plan,
         agent_trace=[
             AgentStepInfo(name=s.name, duration_ms=s.duration_ms, summary=s.summary)

@@ -2,57 +2,49 @@ import json
 import logging
 
 from app.config import settings
-from app.core.agents.base_agent import BaseAgent
+from app.core.agents.base_agent import ControllerAgent
 from app.core.agent_context import AgentContext
+from app.core.prompt_manager import PromptManager
 from app.models.data_types import CriticResult, AgentTrace
+from app.models.capability import AgentCapability, AgentRole
+from app.models.control import ControlAction
 
 logger = logging.getLogger(__name__)
 
-CRITIC_PROMPT = """你是一个答案质量评估员。根据证据和分析结果，判断回答是否准确、完整。
 
-用户问题：{question}
-
-证据：
-{evidence}
-
-分析结果：
-{analysis}
-
-生成回答：{answer}
-
-任务计划：
-{task_plan}
-
-评估标准：
-- 准确性：回答是否基于证据，有无编造
-- 完整性：是否回答了用户的问题
-- 来源引用：是否正确引用了来源
-- 逻辑一致性：回答是否与分析结果矛盾
-
-返回 JSON：
-- {{"score": 8, "problems": [], "need_retry": false, "retry_target": "all"}} — 答案合格
-- {{"score": 4, "problems": ["缺少来源引用"], "need_retry": true, "retry_target": "generator"}} — 需要修改
-
-retry_target 取值：
-- "knowledge": 证据提取有问题，需要重新检索（简单模式）
-- "analysis": 计算/分析有问题，需要重新分析（简单模式）
-- "generator": 表达有问题，只需要重新生成回答
-- "all": 严重问题，需要全部重来
-- "task1", "task2" ... : 指定任务 ID，重新执行该任务及其后续依赖任务（规划模式）
-
-如果问题出在某个具体任务上，优先指定 task ID 而不是笼统的 agent 类型。
-
-只返回 JSON，不要解释。"""
-
-
-class CriticAgent(BaseAgent):
-    """Critic Agent：审核答案质量，输出 CriticResult"""
+class CriticAgent(ControllerAgent):
+    """Critic Agent：审核答案质量，输出 CriticResult，返回 ControlAction"""
 
     name = "Critic"
+    capability = AgentCapability(
+        name="critic",
+        description="答案质量审核，评估准确性、完整性、来源引用、逻辑一致性",
+        inputs=["answer", "retrieval_report"],
+        outputs={
+            "critique": str,
+            "need_retry": bool,
+            "retry_target": str,
+        },
+        merge_policy={
+            "critique": "replace",
+            "need_retry": "replace",
+            "retry_target": "replace",
+        },
+        role=AgentRole.CONTROLLER,
+        control_actions=["retry"],
+        control_outputs=["need_retry", "retry_target"],
+    )
 
     def __init__(self):
         from app.core.llm_factory import create_llm
         self.llm = create_llm(temperature=0)
+
+    def parse_actions(self, context: AgentContext) -> list[ControlAction]:
+        need_retry = context.get_output("need_retry", False)
+        if not need_retry:
+            return []
+        target = context.get_output("retry_target", "all")
+        return [ControlAction(action_type="retry", target_task_id=target)]
 
     async def run(self, context: AgentContext) -> AgentContext:
         import time
@@ -68,11 +60,11 @@ class CriticAgent(BaseAgent):
             critic_result = CriticResult(score=0, need_retry=True, retry_target="all",
                                           problems=[f"Critic 调用失败: {e}"])
 
-        context.set_critique(
-            critique=json.dumps(critic_result.problems, ensure_ascii=False) if critic_result.problems else "",
-            need_retry=critic_result.need_retry,
-            retry_target=critic_result.retry_target,
-        )
+        context.set_output("critique",
+            json.dumps(critic_result.problems, ensure_ascii=False) if critic_result.problems else "",
+            producer="critic")
+        context.set_output("need_retry", critic_result.need_retry, producer="critic")
+        context.set_output("retry_target", critic_result.retry_target, producer="critic")
 
         if critic_result.need_retry:
             logger.info("[Critic] 答案需要修改 (score=%d, target=%s): %s",
@@ -86,30 +78,34 @@ class CriticAgent(BaseAgent):
             start_time=str(int(start * 1000)),
             end_time=str(int(time.time() * 1000)),
             tools_called=[],
-            input_summary=f"evidence={len(context.evidence)}",
+            input_summary=f"evidence={len(context.get_output('evidence') or [])}",
             output_summary=f"score={critic_result.score}, retry={critic_result.need_retry}",
         ))
 
         return context
 
     def _build_prompt(self, context: AgentContext) -> str:
+        evidence_list = context.get_output("evidence") or []
+        analysis_obj = context.get_output("analysis")
+        answer_str = context.get_output("answer") or ""
+
         # 格式化 evidence
-        if context.evidence:
+        if evidence_list:
             evidence_text = "\n".join(
-                f"  - [{ev.source}] {ev.statement}" for ev in context.evidence
+                f"  - [{ev.source}] {ev.statement}" for ev in evidence_list
             )
         else:
             evidence_text = "  无"
 
         # 格式化 analysis
-        if context.analysis:
+        if analysis_obj:
             parts = []
-            if context.analysis.calculations:
+            if analysis_obj.calculations:
                 parts.append("计算：" + ", ".join(
-                    f"{c.operation}({c.field})={c.result}" for c in context.analysis.calculations
+                    f"{c.operation}({c.field})={c.result}" for c in analysis_obj.calculations
                 ))
-            if context.analysis.findings:
-                parts.append("发现：" + "; ".join(context.analysis.findings))
+            if analysis_obj.findings:
+                parts.append("发现：" + "; ".join(analysis_obj.findings))
             analysis_text = "  " + "\n  ".join(parts) if parts else "  无"
         else:
             analysis_text = "  无"
@@ -124,11 +120,26 @@ class CriticAgent(BaseAgent):
         else:
             task_plan = "  无（简单模式）"
 
-        return CRITIC_PROMPT.format(
+        # 格式化检索完整性报告
+        retrieval_report_obj = context.get_output("retrieval_report")
+        if retrieval_report_obj:
+            report_text = (
+                f"  sources: {retrieval_report_obj.sources}\n"
+                f"  total_chunks: {retrieval_report_obj.total_chunks}\n"
+                f"  returned_chunks: {retrieval_report_obj.returned_chunks}\n"
+                f"  is_complete: {retrieval_report_obj.is_complete}\n"
+                f"  read_all_rows_called: {retrieval_report_obj.read_all_rows_called}\n"
+                f"  searches_performed: {retrieval_report_obj.searches_performed}"
+            )
+        else:
+            report_text = "  无"
+
+        return PromptManager.get("critic", "evaluate").format(
             question=context.question,
             evidence=evidence_text,
             analysis=analysis_text,
-            answer=context.answer or "(无回答)",
+            answer=answer_str,
+            retrieval_report=report_text,
             task_plan=task_plan,
         )
 

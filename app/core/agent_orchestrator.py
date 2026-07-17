@@ -1,55 +1,38 @@
 import asyncio
-import concurrent.futures
-import json
 import logging
 
-from app.core.agent_context import AgentContext
-from app.core.agents.coordinator_agent import CoordinatorAgent
-from app.core.agents.knowledge_agent import KnowledgeAgent
-from app.core.agents.analysis_agent import AnalysisAgent
-from app.core.agents.critic_agent import CriticAgent
-from app.core.generator.answer_generator import AnswerGenerator
+from app.core.agent_context import AgentContext, _task_id_var
+from app.core.agents.base_agent import ControllerAgent
 from app.core.agent_memory import AgentMemory
 from app.core.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
 from app.core.prompt_manager import PromptManager
 from app.core.agent_registry import create_default_registry
+from app.core.workflow_validator import WorkflowValidator, PolicyValidator
+from app.models.capability import AgentRole
+from app.models.control import ControlAction
 from app.models.task_graph import TaskGraph, TaskNode
 
 logger = logging.getLogger(__name__)
 
-# Agent 重试字段映射 — 新增 Agent 时在此添加一行
-AGENT_RESET_FIELDS: dict[str, list[str]] = {
-    "knowledge": ["evidence", "sources"],
-    "analysis": ["analysis"],
-    "generator": ["answer"],
-    "critic": ["critique", "need_retry", "retry_target"],
-}
-
 
 class AgentOrchestrator:
-    """编排器：按信息流调度 Agent
+    """编排器：Planner → TaskGraph → Runtime（按 role 分派 Executor/Controller）
 
-    信息流：Coordinator → Knowledge → Analysis → Generate → Critic
+    所有请求统一走 Planner 生成 TaskGraph，不再有简单模式 / 规划模式之分。
+    Controller 是 DAG 内的一类节点，Runtime 按 role 分派执行。
     """
-
-    MAX_CRITIC_RETRIES = 2
 
     def __init__(self, rag_engine, agent_memory: AgentMemory, redis_store: RedisStore, mcp_client: MCPClient):
         self.rag_engine = rag_engine
-        self.coordinator = CoordinatorAgent()
-        self.knowledge_agent = KnowledgeAgent(rag_engine)
-        self.analysis_agent = AnalysisAgent(rag_engine)
-        self.critic_agent = CriticAgent()
-        self.answer_generator = AnswerGenerator()
         self.agent_memory = agent_memory
         self.redis_store = redis_store
         self.mcp_client = mcp_client
 
-        # Agent Registry（能力声明 + 实例绑定）
-        self.registry = create_default_registry()
-        self.registry.register(KnowledgeAgent.capability, self.knowledge_agent)
-        self.registry.register(AnalysisAgent.capability, self.analysis_agent)
+        # Agent Registry（能力声明 + 实例绑定，自动完成实例化）
+        self.workflow_validator = WorkflowValidator()
+        self.policy_validator = PolicyValidator()
+        self.registry = create_default_registry(rag_engine=rag_engine)
 
     async def run(self, context: AgentContext) -> AgentContext:
         # 1. 恢复记忆
@@ -66,253 +49,97 @@ class AgentOrchestrator:
             )
 
         try:
-            # 4. 偏好检测与其他 Agent 并行
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                pref_future = executor.submit(
-                    self.agent_memory.update_preferences, context.session_id, context.question,
-                ) if context.session_id else None
+            # 4. 偏好检测
+            if context.session_id:
+                self.agent_memory.update_preferences(context.session_id, context.question)
 
-                # 5. Coordinator 分类
-                await self.coordinator.execute(context)
+            # 5. Planner 生成 TaskGraph（任何请求都有有效图）
+            plan = self._plan(context.question, context.memory_context)
+            if plan and plan.tasks:
+                context.plan = plan
+                await self._execute_plan(context, plan)
 
-                # 6. 规划模式：复杂问题拆步骤
-                plan = self._plan(context.question, context.memory_context) if self.coordinator.needs_plan else None
-
-                if plan and plan.tasks:
-                    logger.info("[Orchestrator] 规划模式触发: goal=%s, 共 %d 步", plan.goal, len(plan.tasks))
-                    context.plan = plan
-                    await self._execute_plan(context, plan)
-                else:
-                    # 7. 简单模式：Knowledge → Analysis(可选) → Generate
-                    logger.info("[Orchestrator] 简单流程，needs_analysis=%s", self.coordinator.needs_analysis)
-                    await self.knowledge_agent.execute(
-                        context, mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-                    )
-
-                    if self.coordinator.needs_analysis:
-                        await self.analysis_agent.execute(
-                            context, mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-                        )
-
-                    self.answer_generator.generate(context)
-
-                # 8. Critic 审核
-                if self.coordinator.needs_review:
-                    await self._run_critic_with_retry(context)
-
-                # 9. 等待偏好检测完成
-                if pref_future:
-                    pref_future.result()
-
-            # 10. 更新记忆
+            # 6. 更新记忆
             if context.session_id:
                 self._update_memory(context)
 
         finally:
-            # 11. 清理 MCP session 状态
+            # 7. 清理 MCP session 状态
             await self.mcp_client.cleanup_session(context.mcp_session_id)
 
         return context
 
-    # ==================== Critic 审核 + 重试 ====================
-
-    async def _run_critic_with_retry(self, context: AgentContext):
-        """Critic 审核，根据 retry_target 决定重跑范围"""
-        original_question = context.question
-
-        for attempt in range(self.MAX_CRITIC_RETRIES):
-            # 清空上一轮的 critique 状态，允许重新写入
-            context.critique = ""
-            context.need_retry = False
-            context.retry_target = "all"
-
-            await self.critic_agent.execute(context)
-
-            if not context.need_retry:
-                logger.info("[Orchestrator] Critic 审核通过 (第 %d 轮)", attempt + 1)
-                break
-
-            logger.info("[Orchestrator] Critic 反馈 (第 %d 轮): target=%s, %s",
-                        attempt + 1, context.retry_target, context.critique[:100])
-
-            target = context.retry_target
-            self.reset_for_retry(context, target)
-
-            # 规划模式：按 task_id 重跑 DAG 子链
-            if context.plan and target.startswith("task"):
-                context.question = original_question
-                await self._retry_from_task(context, target)
-            else:
-                # 简单模式：按 agent 类型重跑
-                if target in ("knowledge", "all"):
-                    context.question = original_question
-                    await self.knowledge_agent.execute(
-                        context, mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-                    )
-
-                if target in ("analysis", "all") and self.coordinator.needs_analysis:
-                    await self.analysis_agent.execute(
-                        context, mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-                    )
-
-            if target in ("generator", "knowledge", "analysis", "all", *(
-                [t.id for t in context.plan.tasks] if context.plan and context.plan.tasks else []
-            )):
-                context.answer = ""
-                self.answer_generator.generate(context)
-
-        if context.need_retry:
-            logger.warning("[Orchestrator] Critic 审核未通过，使用最后一轮答案")
-            context.answer += "\n\n> 此回答可能不完全准确，建议人工核实。"
-
-        context.question = original_question
-
-    async def _retry_from_task(self, context: AgentContext, task_id: str):
-        """从指定 task 开始，重跑该任务及其所有下游依赖"""
-        if not context.plan:
-            return
-
-        # 找出需要重跑的任务：target task + 所有 transitively dependent tasks
-        task_map = {t.id: t for t in context.plan.tasks}
-        if task_id not in task_map:
-            logger.warning("[Orchestrator] retry 目标 %s 不在 TaskGraph 中", task_id)
-            return
-
-        # BFS 找所有下游任务
-        to_retry = set()
-        queue = [task_id]
-        while queue:
-            tid = queue.pop(0)
-            if tid in to_retry:
-                continue
-            to_retry.add(tid)
-            for t in context.plan.tasks:
-                if tid in t.depends_on:
-                    queue.append(t.id)
-
-        # 按拓扑顺序排序后执行
-        retry_tasks = [t for t in context.plan.tasks if t.id in to_retry]
-        retry_tasks.sort(key=lambda t: len(t.depends_on))
-
-        logger.info("[Orchestrator] 从 task %s 重跑 %d 个任务: %s",
-                    task_id, len(retry_tasks), [t.id for t in retry_tasks])
-
-        for task in retry_tasks:
-            context.question = task.objective
-            prev_evidence = list(context.evidence)
-            prev_sources = list(context.sources)
-
-            cap = self.registry.get(task.agent)
-            agent = self.registry.get_agent(task.agent)
-
-            # 校验前置条件
-            if cap and cap.requires and not self._check_requires(context, cap.requires):
-                logger.warning("[Orchestrator] 跳过 %s: 缺少前置条件 %s", task.id, cap.requires)
-                task.status = "skipped"
-                continue
-
-            try:
-                if cap:
-                    self._clear_fields(context, cap.reset_fields)
-                await agent.execute(
-                    context, task_id=task.id,
-                    mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-                )
-            finally:
-                context.question = context.question  # restore handled by caller
-
-            if cap and "evidence" not in cap.writes_to:
-                context.evidence = prev_evidence + context.evidence
-                context.sources = prev_sources + context.sources
-
-            task.status = "completed"
-            logger.info("[Orchestrator] 重跑步骤 %s 完成, 累计 evidence=%d",
-                        task.id, len(context.evidence))
-
-    # ==================== Agent 调度辅助 ====================
-
-    def reset_for_retry(self, context: AgentContext, target: str):
-        """根据 retry_target + AGENT_RESET_FIELDS 声明清空对应字段"""
-        if target in AGENT_RESET_FIELDS:
-            self._clear_fields(context, AGENT_RESET_FIELDS[target])
-        elif target == "all":
-            for fields in AGENT_RESET_FIELDS.values():
-                self._clear_fields(context, fields)
-            context.is_agg = False
-            context.tools_called = []
-        # target="task1" 等 DAG 模式: 由 _retry_from_task 处理
-
-    @staticmethod
-    def _clear_fields(context: AgentContext, fields: list[str]):
-        """清空指定的 context 字段"""
-        for f in fields:
-            if f == "evidence":
-                context.evidence = []
-            elif f == "sources":
-                context.sources = []
-            elif f == "analysis":
-                context.analysis = None
-            elif f == "answer":
-                context.answer = ""
-            elif f == "critique":
-                context.critique = ""
-            elif f == "need_retry":
-                context.need_retry = False
-            elif f == "retry_target":
-                context.retry_target = "all"
-
-    @staticmethod
-    def _check_requires(context: AgentContext, requires: list[str]) -> bool:
-        """校验执行前必须存在的 context 字段"""
-        field_values = {
-            "evidence": context.evidence,
-            "analysis": context.analysis,
-            "answer": context.answer,
-        }
-        for field_name in requires:
-            if not field_values.get(field_name):
-                return False
-        return True
-
-    # ==================== 规划模式 ====================
+    # ==================== DAG 执行 ====================
 
     async def _execute_plan(self, context: AgentContext, plan: TaskGraph):
-        """执行规划模式 — 按依赖拓扑执行任务图，所有 task 共享同一个 session"""
+        """执行 TaskGraph — 支持 Controller retry 导致的子图重新执行"""
         original_question = context.question
-        completed_ids = set()
-        pending = list(plan.tasks)
+        max_iterations = 10  # 防止 Controller 死循环
 
-        while pending:
-            ready = [t for t in pending if all(d in completed_ids for d in t.depends_on)]
-            if not ready:
-                logger.warning("[Orchestrator] 依赖环或无效依赖，跳过剩余 %d 个任务", len(pending))
+        for _ in range(max_iterations):
+            # 重置执行状态：从 task 的 status 推导
+            completed_ids = {t.id for t in plan.tasks if t.status == "completed"}
+            pending = [t for t in plan.tasks if t.status == "pending"]
+
+            if not pending:
                 break
 
-            for task in ready:
-                await self._run_plan_task(context, task, original_question)
-                completed_ids.add(task.id)
-                pending.remove(task)
+            # 拓扑排序执行 ready 任务（并行执行无依赖的 task，task_id 隔离写冲突）
+            while pending:
+                ready = [t for t in pending if all(d in completed_ids for d in t.depends_on)]
+                if not ready:
+                    logger.warning("[Orchestrator] 依赖环或无效依赖，跳过剩余 %d 个任务", len(pending))
+                    break
 
-        self.answer_generator.generate(context)
+                await asyncio.gather(*(self._run_plan_task(
+                    context, task, original_question,
+                ) for task in ready))
+
+                for task in ready:
+                    completed_ids.add(task.id)
+                    pending.remove(task)
+
+            # 如果全部完成（没有 Controller 触发 retry），退出
+            if not any(t.status == "pending" for t in plan.tasks):
+                break
+
+        # 确保 DAG 中有 generator 或 chat 任务产出 answer
+        if not context.has_output("answer"):
+            logger.info("[Orchestrator] DAG 未产生 answer，执行 Generator 兜底")
+            context.current_task_id = "_fallback"
+            generator = self.registry.get_agent("generator")
+            if generator:
+                await generator.execute(context)
 
     async def _run_plan_task(self, context: AgentContext, task: TaskNode, original_question: str):
-        """执行单个 plan task"""
-        context.question = task.objective
-        prev_evidence = list(context.evidence)
-        prev_sources = list(context.sources)
-
+        """按 role 分派执行单个 task"""
         cap = self.registry.get(task.agent)
-        agent = self.registry.get_agent(task.agent)
-
-        # 校验前置条件
-        if cap and cap.requires and not self._check_requires(context, cap.requires):
-            logger.warning("[Orchestrator] 跳过 %s: 缺少前置条件 %s", task.id, cap.requires)
+        if not cap:
+            logger.warning("[Orchestrator] 未知 agent '%s'，跳过 task %s", task.agent, task.id)
             task.status = "skipped"
             return
 
+        if cap.role == AgentRole.CONTROLLER:
+            await self._execute_controller_task(context, task)
+        else:
+            await self._execute_executor_task(context, task, original_question, cap)
+
+    async def _execute_executor_task(self, context: AgentContext, task: TaskNode, original_question: str, cap):
+        """执行 Executor 任务 — 利用 task_id 隔离写，get_output 自动合并"""
+        context.question = task.objective
+        context.current_task_id = task.id
+        _task_id_var.set(task.id)
+
+        agent = self.registry.get_agent(task.agent)
+
+        # 校验前置条件
+        if cap.inputs and not context.has_all_outputs(cap.inputs):
+            logger.warning("[Orchestrator] 跳过 %s: 缺少 %s", task.id, cap.inputs)
+            task.status = "skipped"
+            context.question = original_question
+            return
+
         try:
-            if cap:
-                self._clear_fields(context, cap.reset_fields)
             await agent.execute(
                 context, task_id=task.id,
                 mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
@@ -320,13 +147,104 @@ class AgentOrchestrator:
         finally:
             context.question = original_question
 
-        if cap and "evidence" not in cap.writes_to:
-            context.evidence = prev_evidence + context.evidence
-            context.sources = prev_sources + context.sources
+        task.status = "completed"
+
+    async def _execute_controller_task(self, context: AgentContext, task: TaskNode):
+        """执行 Controller 任务 — 解析 ControlAction，处理 retry"""
+        from app.models.capability import AgentRole
+
+        cap = self.registry.get(task.agent)
+        agent = self.registry.get_agent(task.agent)
+
+        if not cap or not agent:
+            logger.warning("[Orchestrator] Controller '%s' 未注册", task.agent)
+            task.status = "skipped"
+            return
+
+        context.current_task_id = task.id
+        _task_id_var.set(task.id)
+
+        # 校验前置条件
+        if cap.inputs and not context.has_all_outputs(cap.inputs):
+            logger.warning("[Orchestrator] Controller %s 缺少 inputs %s", task.id, cap.inputs)
+            task.status = "skipped"
+            return
+
+        # ControllerAgent 直接返回 ControlAction 列表
+        if isinstance(agent, ControllerAgent):
+            actions = await agent.execute(
+                context, task_id=task.id,
+                mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
+            )
+        else:
+            logger.warning("[Orchestrator] Agent %s 未继承 ControllerAgent，无法获取 ControlAction", task.agent)
+            task.status = "completed"
+            return
 
         task.status = "completed"
-        logger.info("步骤 %s 完成: %s, 累计 evidence=%d",
-                    task.id, task.objective, len(context.evidence))
+
+        # 处理 control actions
+        for action in actions:
+            await self._handle_control_action(context, action)
+
+    async def _handle_control_action(self, context: AgentContext, action: ControlAction):
+        """处理 ControlAction — 当前仅支持 retry"""
+        plan = context.plan
+        if not plan:
+            return
+
+        if action.action_type == "retry":
+            target_id = action.target_task_id
+            if target_id:
+                logger.info("[Orchestrator] retry action: target=%s", target_id)
+                # 使用 TaskGraph 的 subgraph invalidation（task_id 隔离写，无需清 outputs）
+                affected = plan.invalidate_subgraph({target_id})
+                logger.info("[Orchestrator] 受影响 %d 个 task: %s", len(affected), sorted(affected))
+
+        elif action.action_type == "terminate":
+            logger.info("[Orchestrator] terminate action: 终止执行")
+            # 标记所有 pending 任务为 skipped
+            for t in plan.tasks:
+                if t.status == "pending":
+                    t.status = "skipped"
+
+    # ==================== 通用 Merge Runtime ====================
+
+    @staticmethod
+    def _merge_outputs(old_value, new_value, policy: str, output_key: str):
+        """通用合并策略 — 根据 Capability.merge_policy 决定行为"""
+        if policy == "replace":
+            return new_value
+
+        elif policy == "append":
+            if isinstance(old_value, list) and isinstance(new_value, list):
+                return old_value + new_value
+            return new_value
+
+        elif policy == "dedup":
+            if not isinstance(old_value, list) or not isinstance(new_value, list):
+                return new_value
+            seen = set()
+            for item in old_value:
+                seen.add(AgentOrchestrator._dedup_key(item, output_key))
+            result = list(old_value)
+            for item in new_value:
+                key = AgentOrchestrator._dedup_key(item, output_key)
+                if key not in seen:
+                    seen.add(key)
+                    result.append(item)
+            return result
+
+        return new_value  # 未知策略 fallback 到 replace
+
+    @staticmethod
+    def _dedup_key(item, output_key: str) -> tuple:
+        if output_key == "evidence":
+            return (getattr(item, 'source', ''), getattr(item, 'statement', '')[:200])
+        elif output_key == "sources":
+            return ((item.get("file_name", "") if isinstance(item, dict) else ""), str(item)[:200])
+        else:
+            return (repr(item)[:200],)
 
     # ==================== Plan-and-Execute ====================
 
@@ -340,7 +258,8 @@ class AgentOrchestrator:
 
     def _plan(self, question: str, memory_context: str | None = None) -> TaskGraph | None:
         prompt = PromptManager.get("planner", "system")
-        prompt = prompt.replace("{available_agents}", self.registry.format_for_prompt())
+        prompt = prompt.replace("{available_executors}", self.registry.format_executors_for_prompt())
+        prompt = prompt.replace("{available_controllers}", self.registry.format_controllers_for_prompt())
         doc_names = self.rag_engine.vector_store.get_document_names()
         if doc_names:
             doc_list = "\n".join(f"- [{did}] {name}" for did, name in sorted(doc_names.items()))
@@ -377,7 +296,6 @@ class AgentOrchestrator:
 
     @staticmethod
     def _list_to_task_graph(items: list) -> TaskGraph | None:
-        """兼容旧 flat list 格式：无依赖，顺序执行"""
         tasks = []
         for i, item in enumerate(items):
             step = item if isinstance(item, dict) else {"query": str(item)}
@@ -395,9 +313,14 @@ class AgentOrchestrator:
         return TaskGraph(goal="", tasks=tasks) if tasks else None
 
     def _validate_task_graph(self, plan: TaskGraph) -> bool:
-        errors = self.registry.validate_dag(plan)
+        errors = []
+        errors += self.workflow_validator.validate_structure(plan)
+        if not errors:
+            layers = self.workflow_validator.get_layers(plan)
+            errors += self.registry.validate_capabilities(plan, layers)
+            errors += self.policy_validator.validate_controller_usage(plan, self.registry)
         for err in errors:
-            logger.warning("[Orchestrator] DAG 校验失败: %s", err)
+            logger.warning("[Orchestrator] TaskGraph 校验失败: %s", err)
         return len(errors) == 0
 
     # ==================== 记忆管理 ====================
@@ -424,7 +347,7 @@ class AgentOrchestrator:
         context.memory_context = self.agent_memory.format_context(context.session_id)
 
     def _update_memory(self, context: AgentContext):
-        source_docs = context.sources
+        source_docs = context.get_output("sources") or []
         doc_names = list(dict.fromkeys(
             s.get("file_name", "") for s in source_docs if s.get("file_name")
         ))
@@ -432,7 +355,7 @@ class AgentOrchestrator:
             context.session_id,
             {
                 "question": context.question,
-                "answer": context.answer,
+                "answer": context.get_output("answer") or "",
                 "is_agg": context.is_agg,
                 "tools_called": context.tools_called,
                 "document_ids": context.document_ids,

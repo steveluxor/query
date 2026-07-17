@@ -8,39 +8,11 @@ from app.core.agent_context import AgentContext
 from app.core.rag_engine import RAGEngine
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
+from app.core.prompt_manager import PromptManager
 from app.models.data_types import AnalysisResult, Calculation
-from app.models.capability import AgentCapability
+from app.models.capability import AgentCapability, AgentRole
 
 logger = logging.getLogger(__name__)
-
-ANALYSIS_SYSTEM_PROMPT = """你是一个数据分析专家。基于已检索到的数据，执行精确计算。
-
-工具：
-- calculate_sum: 对指定列求和
-- calculate_rank: 对指定列排序并返回第N名
-
-规则：
-- 必须通过工具获取计算结果，不要自行编造数值
-- 计算工具最多调用8次
-- 如果数据不足，直接说明
-
-你必须以 JSON 格式输出，不要输出任何自然语言。
-如果无法完成分析，返回 {"calculations": [], "findings": [], "conclusions": []}。
-
-输出格式：
-{
-  "calculations": [
-    {
-      "operation": "sum",
-      "field": "price",
-      "arguments": {"row_filter": "", "content_filter": ""},
-      "result": 5000,
-      "source": "sales.xlsx"
-    }
-  ],
-  "findings": ["发现1", "发现2"],
-  "conclusions": ["结论1"]
-}"""
 
 
 class AnalysisAgent(BaseAgent):
@@ -50,10 +22,15 @@ class AnalysisAgent(BaseAgent):
     capability = AgentCapability(
         name="analysis",
         description="数据分析，求和、排名",
+        inputs=["evidence"],
+        outputs={
+            "analysis": AnalysisResult,
+        },
         tools=["calculate_sum", "calculate_rank"],
-        writes_to=["analysis"],
-        requires=["evidence"],
-        reset_fields=["analysis"],
+        merge_policy={
+            "analysis": "replace",
+        },
+        role=AgentRole.EXECUTOR,
     )
 
     def __init__(self, rag_engine: RAGEngine):
@@ -62,7 +39,7 @@ class AnalysisAgent(BaseAgent):
     async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "") -> AgentContext:
         tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["calculate_sum", "calculate_rank"])
 
-        system_prompt = ANALYSIS_SYSTEM_PROMPT
+        system_prompt = PromptManager.get("analysis", "system")
 
         if context.memory_context:
             system_prompt += f"\n\n<长期记忆>\n{context.memory_context}\n</长期记忆>"
@@ -81,14 +58,14 @@ class AnalysisAgent(BaseAgent):
 
             raw_messages = result["messages"]
             analysis = self._parse_analysis(raw_messages)
-            context.set_analysis(analysis)
+            context.set_output("analysis", analysis, producer="analysis")
 
             logger.info("[Analysis] 提取 %d 个计算, %d 个发现",
                         len(analysis.calculations), len(analysis.findings))
 
         except Exception as e:
             logger.error("[Analysis] Agent 执行失败: %s", e)
-            context.set_analysis(AnalysisResult())
+            context.set_output("analysis", AnalysisResult(), producer="analysis")
 
         return context
 
