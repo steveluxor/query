@@ -1,26 +1,26 @@
 import asyncio
 import logging
 
+from app.core.actions import ActionRegistry
 from app.core.agent_context import AgentContext, _task_id_var
-from app.core.agents.base_agent import ControllerAgent
 from app.core.agent_memory import AgentMemory
 from app.core.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
 from app.core.prompt_manager import PromptManager
 from app.core.agent_registry import create_default_registry
-from app.core.workflow_validator import WorkflowValidator, PolicyValidator
-from app.models.capability import AgentRole
-from app.models.control import ControlAction
-from app.models.task_graph import TaskGraph, TaskNode
+from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator
+from app.exceptions import PlannerError, WorkflowValidationError
+from app.models.task_graph import TaskGraph, TaskNode, TaskStatus
 
 logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
-    """编排器：Planner → TaskGraph → Runtime（按 role 分派 Executor/Controller）
+    """编排器：Planner → TaskGraph → Runtime（Capability 驱动，不感知 role）
 
-    所有请求统一走 Planner 生成 TaskGraph，不再有简单模式 / 规划模式之分。
-    Controller 是 DAG 内的一类节点，Runtime 按 role 分派执行。
+    所有请求统一走 Planner 生成 TaskGraph。
+    Runtime 按 Capability 分派，AgentResult 承载 outputs（数据）和 actions（控制信号）。
+    Agent 的输出由 AgentResult.outputs 传递，控制信号由 ActionRegistry 分发。
     """
 
     def __init__(self, rag_engine, agent_memory: AgentMemory, redis_store: RedisStore, mcp_client: MCPClient):
@@ -32,7 +32,11 @@ class AgentOrchestrator:
         # Agent Registry（能力声明 + 实例绑定，自动完成实例化）
         self.workflow_validator = WorkflowValidator()
         self.policy_validator = PolicyValidator()
+        self.goal_validator = GoalValidator()
         self.registry = create_default_registry(rag_engine=rag_engine)
+
+        # Action Registry（ControlAction 分发，新增 action type 只需注册 Handler）
+        self.action_registry = ActionRegistry().create_default()
 
     async def run(self, context: AgentContext) -> AgentContext:
         # 1. 恢复记忆
@@ -49,12 +53,25 @@ class AgentOrchestrator:
             )
 
         try:
-            # 4. 偏好检测
+            # 4. 偏好检测（后台线程执行，不与主流程串行）
+            pref_task = None
             if context.session_id:
-                self.agent_memory.update_preferences(context.session_id, context.question)
+                pref_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self.agent_memory.update_preferences,
+                        context.session_id, context.question,
+                    )
+                )
 
-            # 5. Planner 生成 TaskGraph（任何请求都有有效图）
-            plan = self._plan(context.question, context.memory_context)
+            # 5. Planner 生成 TaskGraph（与偏好检测并行执行）
+            try:
+                plan = self._plan(context.question, context.memory_context)
+                if not plan or not plan.tasks:
+                    plan = self._fallback_plan(context.question)
+            except (PlannerError, WorkflowValidationError) as e:
+                logger.warning("[Orchestrator] Planner 异常: %s，使用 fallback 计划", e)
+                plan = self._fallback_plan(context.question)
+
             if plan and plan.tasks:
                 context.plan = plan
                 await self._execute_plan(context, plan)
@@ -64,6 +81,12 @@ class AgentOrchestrator:
                 self._update_memory(context)
 
         finally:
+            # 确保偏好检测后台任务完成
+            if pref_task:
+                try:
+                    await pref_task
+                except Exception as e:
+                    logger.warning("偏好检测失败（不影响当前回答）: %s", e)
             # 7. 清理 MCP session 状态
             await self.mcp_client.cleanup_session(context.mcp_session_id)
 
@@ -76,10 +99,15 @@ class AgentOrchestrator:
         original_question = context.question
         max_iterations = 10  # 防止 Controller 死循环
 
+        # 从 registry 收集所有 merge_policy，设置到 context
+        context.merge_policies = {}
+        for cap in self.registry.all_capabilities():
+            for key, policy in cap.merge_policy.items():
+                context.merge_policies[key] = policy
+
         for _ in range(max_iterations):
-            # 重置执行状态：从 task 的 status 推导
-            completed_ids = {t.id for t in plan.tasks if t.status == "completed"}
-            pending = [t for t in plan.tasks if t.status == "pending"]
+            completed_ids = {t.id for t in plan.tasks if t.status == TaskStatus.COMPLETED}
+            pending = [t for t in plan.tasks if t.status in (TaskStatus.PENDING, TaskStatus.RETRYING)]
 
             if not pending:
                 break
@@ -100,151 +128,63 @@ class AgentOrchestrator:
                     pending.remove(task)
 
             # 如果全部完成（没有 Controller 触发 retry），退出
-            if not any(t.status == "pending" for t in plan.tasks):
+            remaining = [t for t in plan.tasks if t.status in (TaskStatus.PENDING, TaskStatus.RETRYING)]
+            if not remaining:
                 break
 
-        # 确保 DAG 中有 generator 或 chat 任务产出 answer
-        if not context.has_output("answer"):
-            logger.info("[Orchestrator] DAG 未产生 answer，执行 Generator 兜底")
-            context.current_task_id = "_fallback"
-            generator = self.registry.get_agent("generator")
-            if generator:
-                await generator.execute(context)
+        # 校验 goal_outputs：DAG 执行后必须产出 Planner 声明的所有目标输出
+        if plan and plan.goal_outputs:
+            missing = [o for o in plan.goal_outputs if not context.has_output(o)]
+            if missing:
+                from app.exceptions import WorkflowExecutionError
+                raise WorkflowExecutionError(f"DAG 未产生目标输出: {missing}")
 
     async def _run_plan_task(self, context: AgentContext, task: TaskNode, original_question: str):
-        """按 role 分派执行单个 task"""
+        """按 capability 驱动统一执行 — 不区分 role，AgentResult 承载 outputs 和 actions"""
         cap = self.registry.get(task.agent)
         if not cap:
             logger.warning("[Orchestrator] 未知 agent '%s'，跳过 task %s", task.agent, task.id)
-            task.status = "skipped"
+            task.status = TaskStatus.SKIPPED
             return
 
-        if cap.role == AgentRole.CONTROLLER:
-            await self._execute_controller_task(context, task)
-        else:
-            await self._execute_executor_task(context, task, original_question, cap)
-
-    async def _execute_executor_task(self, context: AgentContext, task: TaskNode, original_question: str, cap):
-        """执行 Executor 任务 — 利用 task_id 隔离写，get_output 自动合并"""
-        context.question = task.objective
-        context.current_task_id = task.id
-        _task_id_var.set(task.id)
-
         agent = self.registry.get_agent(task.agent)
+        if not agent:
+            logger.warning("[Orchestrator] agent '%s' 未绑定实例，跳过 task %s", task.agent, task.id)
+            task.status = TaskStatus.SKIPPED
+            return
 
         # 校验前置条件
         if cap.inputs and not context.has_all_outputs(cap.inputs):
             logger.warning("[Orchestrator] 跳过 %s: 缺少 %s", task.id, cap.inputs)
-            task.status = "skipped"
-            context.question = original_question
-            return
-
-        try:
-            await agent.execute(
-                context, task_id=task.id,
-                mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
-            )
-        finally:
-            context.question = original_question
-
-        task.status = "completed"
-
-    async def _execute_controller_task(self, context: AgentContext, task: TaskNode):
-        """执行 Controller 任务 — 解析 ControlAction，处理 retry"""
-        from app.models.capability import AgentRole
-
-        cap = self.registry.get(task.agent)
-        agent = self.registry.get_agent(task.agent)
-
-        if not cap or not agent:
-            logger.warning("[Orchestrator] Controller '%s' 未注册", task.agent)
-            task.status = "skipped"
+            task.status = TaskStatus.SKIPPED
             return
 
         context.current_task_id = task.id
         _task_id_var.set(task.id)
+        context.question = task.objective
 
-        # 校验前置条件
-        if cap.inputs and not context.has_all_outputs(cap.inputs):
-            logger.warning("[Orchestrator] Controller %s 缺少 inputs %s", task.id, cap.inputs)
-            task.status = "skipped"
-            return
-
-        # ControllerAgent 直接返回 ControlAction 列表
-        if isinstance(agent, ControllerAgent):
-            actions = await agent.execute(
+        try:
+            result = await agent.execute(
                 context, task_id=task.id,
                 mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
             )
-        else:
-            logger.warning("[Orchestrator] Agent %s 未继承 ControllerAgent，无法获取 ControlAction", task.agent)
-            task.status = "completed"
-            return
 
-        task.status = "completed"
+            # outputs → context（由 Runtime 写入，Agent 只管返回）
+            for key, value in result.outputs.items():
+                if value is not None:
+                    context.set_output(key, value, producer=task.agent)
 
-        # 处理 control actions
-        for action in actions:
-            await self._handle_control_action(context, action)
+            # actions → ActionRegistry（新增 action type 只需注册 Handler）
+            for action in result.actions:
+                await self.action_registry.handle(action, context, self)
 
-    async def _handle_control_action(self, context: AgentContext, action: ControlAction):
-        """处理 ControlAction — 当前仅支持 retry"""
-        plan = context.plan
-        if not plan:
-            return
-
-        if action.action_type == "retry":
-            target_id = action.target_task_id
-            if target_id:
-                logger.info("[Orchestrator] retry action: target=%s", target_id)
-                # 使用 TaskGraph 的 subgraph invalidation（task_id 隔离写，无需清 outputs）
-                affected = plan.invalidate_subgraph({target_id})
-                logger.info("[Orchestrator] 受影响 %d 个 task: %s", len(affected), sorted(affected))
-
-        elif action.action_type == "terminate":
-            logger.info("[Orchestrator] terminate action: 终止执行")
-            # 标记所有 pending 任务为 skipped
-            for t in plan.tasks:
-                if t.status == "pending":
-                    t.status = "skipped"
-
-    # ==================== 通用 Merge Runtime ====================
-
-    @staticmethod
-    def _merge_outputs(old_value, new_value, policy: str, output_key: str):
-        """通用合并策略 — 根据 Capability.merge_policy 决定行为"""
-        if policy == "replace":
-            return new_value
-
-        elif policy == "append":
-            if isinstance(old_value, list) and isinstance(new_value, list):
-                return old_value + new_value
-            return new_value
-
-        elif policy == "dedup":
-            if not isinstance(old_value, list) or not isinstance(new_value, list):
-                return new_value
-            seen = set()
-            for item in old_value:
-                seen.add(AgentOrchestrator._dedup_key(item, output_key))
-            result = list(old_value)
-            for item in new_value:
-                key = AgentOrchestrator._dedup_key(item, output_key)
-                if key not in seen:
-                    seen.add(key)
-                    result.append(item)
-            return result
-
-        return new_value  # 未知策略 fallback 到 replace
-
-    @staticmethod
-    def _dedup_key(item, output_key: str) -> tuple:
-        if output_key == "evidence":
-            return (getattr(item, 'source', ''), getattr(item, 'statement', '')[:200])
-        elif output_key == "sources":
-            return ((item.get("file_name", "") if isinstance(item, dict) else ""), str(item)[:200])
-        else:
-            return (repr(item)[:200],)
+            task.status = TaskStatus.COMPLETED
+        except Exception as e:
+            logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
+            task.status = TaskStatus.FAILED
+            raise
+        finally:
+            context.question = original_question
 
     # ==================== Plan-and-Execute ====================
 
@@ -271,46 +211,51 @@ class AgentOrchestrator:
         try:
             result = self.rag_engine.llm.invoke([("human", prompt)])
             data = self._parse_json(result.content)
-            if isinstance(data, list):
-                return self._list_to_task_graph(data)
-            if isinstance(data, dict) and "tasks" in data:
-                plan = self._parse_task_graph(data)
-                if plan and self._validate_task_graph(plan):
-                    return plan
+            if not isinstance(data, dict) or "tasks" not in data:
+                raise PlannerError("Planner 输出缺少 'tasks' 字段")
+            plan = self._parse_task_graph(data)
+            if plan and self._validate_task_graph(plan):
+                return plan
             return None
-        except Exception:
-            return None
+        except (PlannerError, WorkflowValidationError):
+            raise
+        except Exception as e:
+            raise PlannerError(f"Plan 生成异常: {e}") from e
 
     @staticmethod
     def _parse_task_graph(data: dict) -> TaskGraph | None:
         tasks = []
         for t in data.get("tasks", []):
+            agent_name = t.get("agent")
+            if not agent_name:
+                raise WorkflowValidationError(f"Task '{t.get('id', '?')}' 缺少 agent 字段")
             tasks.append(TaskNode(
                 id=t.get("id", ""),
-                agent=t.get("agent", "knowledge"),
+                agent=agent_name,
                 objective=t.get("objective", ""),
                 depends_on=t.get("depends_on", []),
                 output_key=t.get("output_key", ""),
             ))
-        return TaskGraph(goal=data.get("goal", ""), tasks=tasks) if tasks else None
+        return TaskGraph(
+            goal=data.get("goal", ""),
+            goal_outputs=data.get("goal_outputs", []),
+            tasks=tasks,
+        ) if tasks else None
 
     @staticmethod
-    def _list_to_task_graph(items: list) -> TaskGraph | None:
-        tasks = []
-        for i, item in enumerate(items):
-            step = item if isinstance(item, dict) else {"query": str(item)}
-            agent = step.get("agent", "knowledge")
-            query = step.get("query", "")
-            lower = query.lower() if query else ""
-            if any(kw in lower for kw in ("calculate_sum", "calculate_rank")):
-                agent = "analysis"
-            tasks.append(TaskNode(
-                id=f"task{i + 1}",
-                agent=agent,
-                objective=query,
-                depends_on=[f"task{i}"] if i > 0 else [],
-            ))
-        return TaskGraph(goal="", tasks=tasks) if tasks else None
+    def _fallback_plan(question: str) -> TaskGraph:
+        """Planner 失败时生成单任务兜底计划"""
+        lower = question.strip().lower()
+        greeting_keywords = ("你好", "hello", "hi", "嗨", "喂", "您好")
+        if any(kw in lower for kw in greeting_keywords):
+            agent = "chat"
+        else:
+            agent = "generator"
+        return TaskGraph(
+            goal="",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent=agent, objective=question)],
+        )
 
     def _validate_task_graph(self, plan: TaskGraph) -> bool:
         errors = []
@@ -319,6 +264,8 @@ class AgentOrchestrator:
             layers = self.workflow_validator.get_layers(plan)
             errors += self.registry.validate_capabilities(plan, layers)
             errors += self.policy_validator.validate_controller_usage(plan, self.registry)
+            errors += self.goal_validator.validate_goal_capability(plan, self.registry)
+            errors += self.goal_validator.validate_goal_reachability(plan, self.registry)
         for err in errors:
             logger.warning("[Orchestrator] TaskGraph 校验失败: %s", err)
         return len(errors) == 0

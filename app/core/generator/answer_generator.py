@@ -18,7 +18,7 @@ class AnswerGenerator(BaseAgent):
     capability = AgentCapability(
         name="generator",
         description="基于 evidence 和 analysis 生成最终自然语言回答",
-        inputs=["evidence", "analysis"],
+        inputs=[],  # 不设硬性依赖 — 没有 evidence 时也能输出降级回答
         outputs={
             "answer": str,
         },

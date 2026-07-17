@@ -180,9 +180,13 @@ planner:
     }
     上例中 task1 和 task2 互不依赖，可并行执行。
 
+    goal_outputs 是当前 DAG 需要产出的最终输出 key 列表，通常为 ["answer"]。
+    DAG 中所有 task 的产出必须能覆盖 goal_outputs。
+
     返回 JSON（只返回 JSON）：
     {
       "goal": "目标描述",
+      "goal_outputs": ["answer"],
       "tasks": [
         {"id": "task1", "agent": "knowledge", "objective": "获取XX数据", "depends_on": []},
         {"id": "task2", "agent": "analysis", "objective": "计算XX", "depends_on": ["task1"]}

@@ -102,3 +102,40 @@ class PolicyValidator:
                     errors.append(f"Controller '{task.id}' 的 control_output '{control_out}' 被 Executor 消费，不允许")
 
         return errors
+
+
+class GoalValidator:
+    """goal_outputs 校验器 — 两层校验：capability 存在性 + DAG 可达性"""
+
+    def validate_goal_capability(self, plan, registry) -> list[str]:
+        """第一层：每个 goal_output 至少有一个 Agent 的 output_keys 包含它"""
+        if not plan.goal_outputs:
+            return []
+        all_keys = set()
+        for cap in registry.all_capabilities():
+            all_keys.update(cap.output_keys)
+        missing = set(plan.goal_outputs) - all_keys
+        return [f"goal_output '{m}' 在所有注册 Agent 中均不可达" for m in missing]
+
+    def validate_goal_reachability(self, plan, registry) -> list[str]:
+        """第二层：按 DAG 拓扑序传播 outputs，判断当前 DAG 能产出 goal_outputs"""
+        if not plan.goal_outputs:
+            return []
+        validator = WorkflowValidator()
+        layers = validator.get_layers(plan)
+
+        node_outputs: dict[str, set[str]] = {}
+        for layer_depth in sorted(set(layers.values())):
+            for t in plan.tasks:
+                if layers.get(t.id) != layer_depth:
+                    continue
+                cap = registry.get(t.agent)
+                if cap:
+                    node_outputs[t.id] = set(cap.output_keys)
+
+        all_task_outputs = set()
+        for outs in node_outputs.values():
+            all_task_outputs.update(outs)
+
+        missing = set(plan.goal_outputs) - all_task_outputs
+        return [f"goal_output '{m}' 在当前 DAG 中不可达" for m in missing]

@@ -62,6 +62,17 @@ class RetrievalReport:
 
 
 @dataclass
+class AgentResult:
+    """Agent 执行结果 — Runtime 统一处理 outputs（持久数据）和 actions（控制信号）
+
+    - outputs: 持久化到 context.outputs 的数据（evidence, analysis, answer 等）
+    - actions: 一次性 Runtime 控制事件（retry, terminate 等），不落 context
+    """
+    outputs: dict[str, Any] = field(default_factory=dict)
+    actions: list = field(default_factory=list)  # list[ControlAction] (避免循环导入)
+
+
+@dataclass
 class AgentTrace:
     """单个 Agent 的执行轨迹"""
     task_id: str = ""                   # 关联 TaskGraph 中的任务 ID

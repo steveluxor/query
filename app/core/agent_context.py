@@ -53,6 +53,7 @@ class AgentContext:
 
     # ==================== 运行时上下文（每轮执行前设置） ====================
     current_task_id: str = ""
+    merge_policies: dict[str, str] = field(default_factory=dict)
 
     # ==================== 兼容字段（过渡期保留） ====================
     tools_called: list[str] = field(default_factory=list)
@@ -76,22 +77,55 @@ class AgentContext:
                 metadata={"task_id": task_id},
             )
 
-    def get_output(self, key: str, default=None):
-        """获取输出值 — 同一 key 被多 task 写入时自动合并"""
+    def get_output(self, key: str, default=None, merge_policy: str = ""):
+        """获取输出值 — 同一 key 被多 task 写入时按 merge_policy 合并
+
+        merge_policy 优先级：显式传入 > self.merge_policies[key] > "append"
+        """
         entries = self.outputs.get(key)
         if not entries:
             return default
         values = [e.value for e in entries.values()]
         if len(values) == 1:
             return values[0]
-        # 多 task 写入：list 类型 concat 合并，其他 last writer wins
+
+        if not merge_policy:
+            merge_policy = self.merge_policies.get(key, "append")
+        return AgentContext._merge_values(values, merge_policy, key)
+
+    @staticmethod
+    def _merge_values(values: list, policy: str, key: str):
+        """通用合并策略 — replace / append / dedup"""
+        if policy == "replace":
+            return values[-1]
+
         if isinstance(values[0], list):
             merged = []
             for v in values:
                 if isinstance(v, list):
                     merged.extend(v)
+
+            if policy == "dedup":
+                seen = set()
+                result = []
+                for item in merged:
+                    dk = AgentContext._dedup_key(item, key)
+                    if dk not in seen:
+                        seen.add(dk)
+                        result.append(item)
+                return result
             return merged
+
         return values[-1]
+
+    @staticmethod
+    def _dedup_key(item, output_key: str) -> tuple:
+        if output_key == "evidence":
+            return (getattr(item, 'source', ''), getattr(item, 'statement', '')[:200])
+        elif output_key == "sources":
+            return ((item.get("file_name", "") if isinstance(item, dict) else ""), str(item)[:200])
+        else:
+            return (repr(item)[:200],)
 
     def get_output_entry(self, key: str, task_id: str = "") -> AgentOutput | None:
         """获取完整 AgentOutput（含 producer/version/timestamp 元数据）"""

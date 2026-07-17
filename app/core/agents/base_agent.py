@@ -1,10 +1,9 @@
 import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
 
 from app.core.agent_context import AgentContext, AgentStep
-from app.models.data_types import AgentTrace
+from app.models.data_types import AgentResult, AgentTrace
 from app.models.capability import AgentCapability
 from app.models.control import ControlAction
 
@@ -12,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseAgent(ABC):
-    """Agent 基类：统一日志、计时、错误处理"""
+    """Agent 基类：统一日志、计时、错误处理、AgentResult 构建"""
 
     name: str = "base"
     capability: AgentCapability | None = None
@@ -21,12 +20,12 @@ class BaseAgent(ABC):
     async def run(self, context: AgentContext, **kwargs) -> AgentContext:
         ...
 
-    async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> Any:
-        """包装 run()，添加计时、日志和执行轨迹"""
+    async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> AgentResult:
+        """包装 run()，返回 AgentResult（子类可以 override 以提供 outputs/actions）"""
         start = time.time()
         logger.info("[%s] 开始执行 (task=%s)", self.name, task_id or "-")
         try:
-            result = await self.run(context, **kwargs)
+            await self.run(context, **kwargs)
             duration = int((time.time() - start) * 1000)
             context.steps.append(AgentStep(
                 name=self.name,
@@ -40,7 +39,7 @@ class BaseAgent(ABC):
                 end_time=str(int(time.time() * 1000)),
             ))
             logger.info("[%s] 执行完成，耗时 %dms", self.name, duration)
-            return result
+            return AgentResult()
         except Exception as e:
             duration = int((time.time() - start) * 1000)
             context.steps.append(AgentStep(
@@ -60,8 +59,8 @@ class ControllerAgent(BaseAgent):
       - parse_actions(): 从 context 提取 ControlAction 列表
     """
 
-    async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> list[ControlAction]:
-        """执行 Controller，返回 ControlAction 列表"""
+    async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> AgentResult:
+        """执行 Controller，返回 AgentResult(actions=[...])"""
         start = time.time()
         logger.info("[%s] Controller 开始执行 (task=%s)", self.name, task_id or "-")
         try:
@@ -80,7 +79,7 @@ class ControllerAgent(BaseAgent):
                 end_time=str(int(time.time() * 1000)),
             ))
             logger.info("[%s] Controller 完成，%d actions，耗时 %dms", self.name, len(actions), duration)
-            return actions
+            return AgentResult(actions=actions)
         except Exception as e:
             duration = int((time.time() - start) * 1000)
             logger.error("[%s] Controller 执行失败: %s", self.name, e)
