@@ -6,12 +6,11 @@ from app.models.capability import AgentCapability
 from app.models.task_graph import TaskGraph, TaskNode
 
 
-def _make_cap(name: str, tools=None, writes_to=None, requires=None) -> AgentCapability:
+def _make_cap(name: str, tools=None, writes_to=None) -> AgentCapability:
     return AgentCapability(
         name=name,
         description=f"{name} agent",
         tools=tools or [],
-        inputs=requires or [],
         outputs={k: str for k in (writes_to or [])},
     )
 
@@ -89,7 +88,7 @@ class TestValidateCapabilities:
     def test_valid_dag(self):
         reg = AgentRegistry()
         reg.register(_make_cap("knowledge", writes_to=["evidence"]))
-        reg.register(_make_cap("analysis", writes_to=["analysis"], requires=["evidence"]))
+        reg.register(_make_cap("analysis", writes_to=["analysis"]))
 
         plan = TaskGraph(
             goal="分析",
@@ -111,33 +110,6 @@ class TestValidateCapabilities:
         layers = {"t1": 0}
         errors = reg.validate_capabilities(plan, layers)
         assert any("未注册" in e for e in errors)
-
-    def test_missing_input(self):
-        reg = AgentRegistry()
-        reg.register(_make_cap("analysis", requires=["evidence"]))
-        plan = TaskGraph(
-            goal="test",
-            tasks=[TaskNode(id="t1", agent="analysis", objective="分析")],
-        )
-        layers = {"t1": 0}
-        errors = reg.validate_capabilities(plan, layers)
-        assert any("缺少输入" in e for e in errors)
-
-    def test_input_satisfied(self):
-        reg = AgentRegistry()
-        reg.register(_make_cap("knowledge", writes_to=["evidence"]))
-        reg.register(_make_cap("analysis", writes_to=["analysis"], requires=["evidence"]))
-
-        plan = TaskGraph(
-            goal="test",
-            tasks=[
-                TaskNode(id="t1", agent="knowledge", objective="检索"),
-                TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
-            ],
-        )
-        layers = {"t1": 0, "t2": 1}
-        errors = reg.validate_capabilities(plan, layers)
-        assert not any("缺少输入" in e for e in errors)
 
     def test_output_conflict_same_layer_allowed(self):
         """同层输出冲突不再报错，因为 set_output 已按 task_id 隔离"""
@@ -169,20 +141,3 @@ class TestValidateCapabilities:
         layers = {"t1": 0, "t2": 1}
         errors = reg.validate_capabilities(plan, layers)
         assert not any("输出冲突" in e for e in errors)
-
-
-class TestFormatForPrompt:
-    def test_format_for_prompt(self):
-        reg = AgentRegistry()
-        reg.register(_make_cap("knowledge", tools=["search", "list"]))
-        reg.register(_make_cap("analysis", tools=["calculate"]))
-        text = reg.format_for_prompt()
-        assert "knowledge" in text
-        assert "search" in text
-        assert "analysis" in text
-
-    def test_format_for_prompt_no_tools(self):
-        reg = AgentRegistry()
-        reg.register(_make_cap("coordinator", tools=[]))
-        text = reg.format_for_prompt()
-        assert "无" in text

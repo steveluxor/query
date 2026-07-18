@@ -85,3 +85,121 @@ class TestGetLayers:
         assert layers["t1"] == 0
         assert layers["t2"] == 0
         assert layers["t3"] == 1
+
+
+class TestDAGDataFlowValidator:
+    def setup_method(self):
+        from app.core.workflow_validator import DAGDataFlowValidator
+        from app.core.agent_registry import AgentRegistry
+        from app.models.capability import AgentCapability
+        self.validator = DAGDataFlowValidator()
+        self.registry = AgentRegistry()
+        self.registry.register(AgentCapability(
+            name="knowledge",
+            outputs={"evidence": list, "sources": list},
+        ))
+        self.registry.register(AgentCapability(
+            name="analysis",
+            outputs={"analysis": object},
+        ))
+        self.registry.register(AgentCapability(
+            name="generator",
+            outputs={"answer": str},
+        ))
+
+    def test_valid_input_mapping(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="analysis", objective="分析",
+                         depends_on=["t1"], input_mapping={"documents": "t1.evidence"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert errors == []
+
+    def test_missing_task_id_prefix(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="analysis", objective="分析",
+                         depends_on=["t1"], input_mapping={"documents": "evidence"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert any("缺少 task_id." in e for e in errors)
+
+    def test_non_existent_source_task(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="generator", objective="生成",
+                         input_mapping={"evidence": "nonexistent.evidence"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert any("不存在" in e for e in errors)
+
+    def test_not_an_ancestor(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="generator", objective="生成",
+                         input_mapping={"documents": "t1.evidence"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert any("非上游" in e for e in errors)
+
+    def test_missing_output_key(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="generator", objective="生成",
+                         depends_on=["t1"], input_mapping={"data": "t1.nonexistent"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert any("无 output_key" in e for e in errors)
+
+    def test_empty_input_mapping(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="generator", objective="生成", depends_on=["t1"]),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert errors == []
+
+    def test_transitive_ancestor(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
+                TaskNode(id="t3", agent="generator", objective="生成",
+                         depends_on=["t2"], input_mapping={"data": "t1.evidence"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert errors == []
+
+    def test_multiple_input_mappings(self):
+        plan = TaskGraph(
+            goal="test",
+            tasks=[
+                TaskNode(id="t1", agent="knowledge", objective="检索"),
+                TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
+                TaskNode(id="t3", agent="generator", objective="生成",
+                         depends_on=["t1", "t2"],
+                         input_mapping={"evidence": "t1.evidence", "analysis": "t2.analysis"}),
+            ],
+        )
+        errors = self.validator.validate_input_mapping(plan, self.registry)
+        assert errors == []

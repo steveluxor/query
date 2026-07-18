@@ -14,7 +14,6 @@ class ChatAgent(BaseAgent):
     capability = AgentCapability(
         name="chat",
         description="问候、闲聊等无需检索知识的简单对话",
-        inputs=[],
         outputs={
             "answer": str,
         },

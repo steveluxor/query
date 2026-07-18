@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchContext:
-    """搜索上下文（Knowledge Agent 使用，兼容 /qa/ask 旧流程）"""
+    """搜索上下文（RAG Engine 内部使用）"""
     last_search_chunks: list = field(default_factory=list)
     last_search_filtered: list = field(default_factory=list)
     last_search_all_chunks: list = field(default_factory=list)

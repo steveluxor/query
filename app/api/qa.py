@@ -29,7 +29,6 @@ async def ask_question(
         session_id=request.session_id,
         document_ids=request.document_ids,
         history=request.history,
-        top_k=request.top_k,
         preferences=request.preferences,
     )
 

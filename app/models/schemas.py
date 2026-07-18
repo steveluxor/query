@@ -24,7 +24,6 @@ class QuestionRequest(BaseModel):
     """问答请求"""
     question: str
     document_ids: list[int] | None = None
-    top_k: int = 5
     history: list[HistoryItem] | None = None
     session_id: str | None = None
     strategy: str | None = None  # relevance / diversity / None(自动判断)

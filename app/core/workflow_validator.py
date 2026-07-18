@@ -85,21 +85,10 @@ class PolicyValidator:
             if cap.role != AgentRole.CONTROLLER:
                 continue
 
-            # 1. Controller 不能是 DAG 根节点（除非显式允许）
+            # Controller 不能是 DAG 根节点（除非显式允许）
             is_root = not task.depends_on or all(d not in ids for d in task.depends_on)
             if is_root and not cap.allow_root_controller:
                 errors.append(f"Controller '{task.id}' 是根节点（无上游依赖），如需此行为请设置 allow_root_controller=True")
-
-            # 2. Controller 的 control_outputs 不可被 Executor 消费
-            all_executor_inputs = set()
-            for t2 in plan.tasks:
-                cap2 = registry.get(t2.agent)
-                if cap2 and cap2.role == AgentRole.EXECUTOR:
-                    all_executor_inputs.update(cap2.inputs)
-
-            for control_out in cap.control_outputs:
-                if control_out in all_executor_inputs:
-                    errors.append(f"Controller '{task.id}' 的 control_output '{control_out}' 被 Executor 消费，不允许")
 
         return errors
 
@@ -138,4 +127,69 @@ class GoalValidator:
             all_task_outputs.update(outs)
 
         missing = set(plan.goal_outputs) - all_task_outputs
+        if missing:
+            logger.warning("[GoalValidator] DAG task outputs: %s, goal_outputs: %s, missing: %s",
+                           {t.id: list(node_outputs.get(t.id, [])) for t in plan.tasks},
+                           plan.goal_outputs, list(missing))
         return [f"goal_output '{m}' 在当前 DAG 中不可达" for m in missing]
+
+
+class DAGDataFlowValidator:
+    """校验 input_mapping 合法性：来源 task 存在 + 在上游 + 有对应 output_key"""
+
+    def _is_ancestor(self, task_id: str, potential_ancestor: str, plan: TaskGraph) -> bool:
+        """BFS 检查 potential_ancestor 是否是 task_id 的上游"""
+        task_map = {t.id: t for t in plan.tasks}
+        visited = set()
+        queue = [task_id]
+        while queue:
+            tid = queue.pop(0)
+            if tid in visited:
+                continue
+            visited.add(tid)
+            for dep in task_map[tid].depends_on:
+                if dep == potential_ancestor:
+                    return True
+                queue.append(dep)
+        return False
+
+    def validate_input_mapping(self, plan: TaskGraph, registry) -> list[str]:
+        """校验 input_mapping：格式 + 来源 task 注册 + 在上游 + output key 存在"""
+        errors = []
+        task_ids = {t.id for t in plan.tasks}
+        task_map = {t.id: t for t in plan.tasks}
+
+        for task in plan.tasks:
+            for param_name, source_ref in task.input_mapping.items():
+                # 格式校验：必须含 task_id. 前缀
+                if "." not in source_ref:
+                    errors.append(
+                        f"{task.id}.input_mapping['{param_name}']='{source_ref}' 缺少 task_id. 前缀"
+                    )
+                    continue
+
+                source_task_id, output_key = source_ref.split(".", 1)
+
+                # source_task 存在
+                if source_task_id not in task_ids:
+                    errors.append(
+                        f"{task.id}: input_mapping 引用的上游 task '{source_task_id}' 不存在"
+                    )
+                    continue
+
+                # source_task 是上游
+                if source_task_id not in task.depends_on and not self._is_ancestor(task.id, source_task_id, plan):
+                    errors.append(
+                        f"{task.id}: input_mapping 引用了非上游 task '{source_task_id}'"
+                    )
+                    continue
+
+                # output_key 在 source Agent 的能力中
+                source_agent = task_map[source_task_id].agent
+                source_cap = registry.get(source_agent)
+                if not source_cap or output_key not in source_cap.output_keys:
+                    errors.append(
+                        f"{task.id}: 上游 '{source_task_id}' ({source_agent}) 无 output_key '{output_key}'"
+                    )
+
+        return errors

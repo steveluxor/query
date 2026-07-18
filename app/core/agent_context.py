@@ -38,7 +38,6 @@ class AgentContext:
     document_ids: list[int] | None = None
     history: list[dict] | None = None
     memory_context: str | None = None
-    top_k: int = 5
     preferences: dict | None = None
     plan: TaskGraph | None = None
 
@@ -145,10 +144,6 @@ class AgentContext:
     def has_output(self, key: str) -> bool:
         """检查指定 output 是否存在"""
         return key in self.outputs
-
-    def has_all_outputs(self, keys: list[str]) -> bool:
-        """批量检查所有指定 output 是否存在"""
-        return all(key in self.outputs for key in keys)
 
     # ==================== 快捷方法（保留兼容） ====================
 

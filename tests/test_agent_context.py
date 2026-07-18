@@ -56,13 +56,6 @@ class TestSetOutput:
         assert not ctx.has_output("a")
         assert ctx.has_output("b")
 
-    def test_has_all_outputs(self):
-        ctx = AgentContext(question="q")
-        ctx.set_output("a", 1)
-        ctx.set_output("b", 2)
-        assert ctx.has_all_outputs(["a", "b"])
-        assert not ctx.has_all_outputs(["a", "c"])
-
     def test_output_not_shared_across_contexts(self):
         ctx1 = AgentContext(question="q1")
         ctx2 = AgentContext(question="q2")

@@ -18,7 +18,6 @@ class AnswerGenerator(BaseAgent):
     capability = AgentCapability(
         name="generator",
         description="基于 evidence 和 analysis 生成最终自然语言回答",
-        inputs=[],  # 不设硬性依赖 — 没有 evidence 时也能输出降级回答
         outputs={
             "answer": str,
         },
@@ -33,15 +32,20 @@ class AnswerGenerator(BaseAgent):
         self.llm = create_llm()
 
     async def run(self, context: AgentContext, **kwargs) -> AgentContext:
-        self._generate(context)
+        self._generate(context, **kwargs)
         return context
 
-    def _generate(self, context: AgentContext) -> None:
-        """基于 context 中的 evidence 和 analysis 生成最终 answer"""
+    def _generate(self, context: AgentContext, **kwargs) -> None:
+        """基于 evidence/analysis/knowledge_objects 生成最终 answer"""
         import time
         start = time.time()
 
-        prompt = self._build_prompt(context)
+        evidence_list = kwargs.get("evidence", [])
+        analysis_obj = kwargs.get("analysis")
+        sources_list = kwargs.get("sources", [])
+        knowledge_objects = kwargs.get("knowledge_objects", [])
+
+        prompt = self._build_prompt(context, evidence_list, analysis_obj, sources_list, knowledge_objects)
 
         try:
             result = self.llm.invoke([("human", prompt)])
@@ -49,7 +53,7 @@ class AnswerGenerator(BaseAgent):
             logger.info("[Generator] 生成回答完成，长度 %d", len(result.content))
         except Exception as e:
             logger.warning("[Generator] LLM 生成失败: %s", e)
-            context.set_output("answer", self._fallback_answer(context), producer="generator")
+            context.set_output("answer", self._fallback_answer(context, evidence_list), producer="generator")
 
         duration = int((time.time() - start) * 1000)
         context.add_trace(AgentTrace(
@@ -57,31 +61,38 @@ class AnswerGenerator(BaseAgent):
             start_time=str(int(start * 1000)),
             end_time=str(int(time.time() * 1000)),
             tools_called=[],
-            input_summary=f"evidence={len(context.get_output('evidence') or [])}, analysis={'有' if context.get_output('analysis') else '无'}",
+            input_summary=f"evidence={len(evidence_list)}, analysis={'有' if analysis_obj else '无'}",
             output_summary=f"answer_len={len(context.get_output('answer') or '')}",
         ))
 
-    def _build_prompt(self, context: AgentContext) -> str:
-        evidence_list = context.get_output("evidence") or []
-        analysis_obj = context.get_output("analysis")
-        sources_list = context.get_output("sources") or []
-
+    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_obj=None, sources_list=None, knowledge_objects=None) -> str:
         """构建 Generator prompt — 只包含 question/evidence/analysis/sources"""
         parts = [PromptManager.get("generator", "system"), ""]
 
         # 用户问题
         parts.append(f"用户问题：{context.question}")
 
-        # 证据
-        if evidence_list:
-            evidence_lines = []
-            for i, ev in enumerate(evidence_list, 1):
-                evidence_lines.append(
-                    f"  {i}. [{ev.source}] {ev.statement} (type={ev.evidence_type})"
+        # 知识对象（优先于 evidence）
+        if knowledge_objects:
+            ko_lines = []
+            for i, ko in enumerate(knowledge_objects, 1):
+                attrs_str = "; ".join(
+                    f"{k}={', '.join(v) if isinstance(v, list) else v}"
+                    for k, v in ko.attributes.items()
                 )
-            parts.append(f"\n证据：\n" + "\n".join(evidence_lines))
+                ko_lines.append(f"  {i}. [{ko.source}] {ko.topic}: {attrs_str}")
+            parts.append(f"\n知识对象：\n" + "\n".join(ko_lines))
         else:
-            parts.append("\n证据：无")
+            # 证据（fallback）
+            if evidence_list:
+                evidence_lines = []
+                for i, ev in enumerate(evidence_list, 1):
+                    evidence_lines.append(
+                        f"  {i}. [{ev.source}] {ev.statement} (type={ev.evidence_type})"
+                    )
+                parts.append(f"\n证据：\n" + "\n".join(evidence_lines))
+            else:
+                parts.append("\n证据：无")
 
         # 分析结果
         if analysis_obj:
@@ -106,9 +117,10 @@ class AnswerGenerator(BaseAgent):
         parts.append("\n请基于以上信息组织最终回答。")
         return "\n".join(parts)
 
-    def _fallback_answer(self, context: AgentContext) -> str:
-        evidence_list = context.get_output("evidence") or []
+    def _fallback_answer(self, context: AgentContext, evidence_list=None) -> str:
         """LLM 失败时的降级回答"""
+        if evidence_list is None:
+            evidence_list = []
         if evidence_list:
             lines = [f"- {ev.statement}" for ev in evidence_list[:5]]
             return "根据检索到的内容：\n" + "\n".join(lines)

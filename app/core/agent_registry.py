@@ -61,7 +61,7 @@ class AgentRegistry:
     # ==================== Agent 能力校验 ====================
 
     def validate_capabilities(self, plan, layers: dict[str, int]) -> list[str]:
-        """校验 Agent 能力合法性：注册 + inputs 前置 + outputs 冲突 + control_actions 契约"""
+        """校验 Agent 能力合法性：注册 + outputs 冲突 + control_actions 契约"""
         errors = []
 
         # 收集每个 task 产出的 output_key（基于 layer 分组）
@@ -73,20 +73,6 @@ class AgentRegistry:
                 continue
             layer = layers.get(t.id, 0)
             produced_by_layer.setdefault(layer, set()).update(cap.output_keys)
-
-        # requires/inputs 校验（layer-based：累计上游产出）
-        upstream_outputs: set[str] = set()
-        for layer_depth in sorted(produced_by_layer.keys()):
-            for t in plan.tasks:
-                if layers.get(t.id, 0) != layer_depth:
-                    continue
-                cap = self._capabilities.get(t.agent)
-                if not cap:
-                    continue
-                for req in cap.inputs:
-                    if req not in upstream_outputs:
-                        errors.append(f"{t.id} 缺少输入 '{req}'（无上游产出）")
-            upstream_outputs.update(produced_by_layer.get(layer_depth, set()))
 
         # 输出冲突检测（同层 task 写同一 output_key — 允许但警告）
         for layer_depth, produced in produced_by_layer.items():
@@ -107,7 +93,6 @@ class AgentRegistry:
         for t in plan.tasks:
             cap = self._capabilities.get(t.agent)
             if cap and cap.control_actions:
-                # 校验 Planner 没有直接在 task 中引用 control_action（应由 Controller 在运行时决定）
                 for key in ("action", "control_action", "retry_target"):
                     if key in t.__dict__ and t.__dict__.get(key):
                         errors.append(f"{t.id} Planner 不应指定 control action '{key}'，应由 Controller 运行时决定")
@@ -120,42 +105,42 @@ class AgentRegistry:
         """生成 Executor Agent prompt 片段"""
         lines = []
         for cap in self.find_executors():
-            inputs_str = ", ".join(cap.inputs) if cap.inputs else "无"
             outputs_str = ", ".join(cap.output_keys) if cap.output_keys else "无"
             tools_str = ", ".join(cap.tools) if cap.tools else "无"
             lines.append(f"- {cap.name}: {cap.description}")
-            lines.append(f"  输入: [{inputs_str}], 输出: [{outputs_str}], 工具: {tools_str}")
+            lines.append(f"  输出: [{outputs_str}], 工具: {tools_str}")
         return "\n".join(lines)
 
     def format_controllers_for_prompt(self) -> str:
         """生成 Controller Agent prompt 片段"""
         lines = []
         for cap in self.find_controllers():
-            inputs_str = ", ".join(cap.inputs) if cap.inputs else "无"
             outputs_str = ", ".join(cap.output_keys) if cap.output_keys else "无"
             actions_str = ", ".join(cap.control_actions) if cap.control_actions else "无"
             lines.append(f"- {cap.name}: {cap.description}")
-            lines.append(f"  输入: [{inputs_str}], 输出: [{outputs_str}], control_actions: {actions_str}")
+            lines.append(f"  输出: [{outputs_str}], control_actions: {actions_str}")
         return "\n".join(lines)
 
 
 def create_default_registry(rag_engine=None) -> AgentRegistry:
     """创建并填充默认 Registry — 所有 Agent 在此注册（含实例化）"""
-    from app.core.agents.knowledge_agent import KnowledgeAgent
     from app.core.agents.analysis_agent import AnalysisAgent
     from app.core.agents.critic_agent import CriticAgent
     from app.core.agents.chat_agent import ChatAgent
+    from app.core.agents.retrieval_agent import RetrievalAgent
+    from app.core.agents.extraction_agent import ExtractionAgent
     from app.core.generator.answer_generator import AnswerGenerator
 
     # 实例化（依赖 rag_engine 的 Agent 需要传入）
-    knowledge = KnowledgeAgent(rag_engine) if rag_engine else KnowledgeAgent.__new__(KnowledgeAgent)
     analysis = AnalysisAgent(rag_engine) if rag_engine else AnalysisAgent.__new__(AnalysisAgent)
     critic = CriticAgent()
     chat = ChatAgent()
     generator = AnswerGenerator()
+    retrieval = RetrievalAgent()
+    extractor = ExtractionAgent()
 
     registry = AgentRegistry()
-    for agent in [knowledge, analysis, critic, chat, generator]:
+    for agent in [analysis, critic, chat, generator, retrieval, extractor]:
         if hasattr(agent, 'capability') and agent.capability:
             registry.register(agent.capability, agent)
     return registry

@@ -16,7 +16,7 @@ class AgentOutput:
 
 @dataclass
 class Evidence:
-    """Knowledge Agent 提取的事实证据"""
+    """提取 Agent 输出的事实证据"""
     statement: str          # "2024年A产品销量70万"
     source: str             # "sales.xlsx"
     evidence_type: str      # "table" / "text" / "calculation"
@@ -52,7 +52,7 @@ class CriticResult:
 
 @dataclass
 class RetrievalReport:
-    """Knowledge Agent 的检索完整性报告"""
+    """检索完整性报告"""
     sources: list[str] = field(default_factory=list)        # 搜索到的文档名列表
     total_chunks: int = 0                                    # 命中文档的全量 chunk 数
     returned_chunks: int = 0                                 # 实际返回到 selected 的 chunk 数
@@ -73,10 +73,34 @@ class AgentResult:
 
 
 @dataclass
+class DocumentChunk:
+    """文档切片 — 检索结果的最小单位"""
+    source: str          # 文件名
+    content: str         # chunk 文本
+    chunk_index: int = 0     # 在文档中的序号
+    total_chunks: int = 0    # 该文档的总 chunk 数
+
+
+@dataclass
+class DocumentBundle:
+    """文档包 — RetrievalAgent 的输出，保持 chunk 级粒度"""
+    chunks: list[DocumentChunk] = field(default_factory=list)
+
+
+@dataclass
+class KnowledgeObject:
+    """知识对象 — 从文档中提取的结构化语义信息"""
+    topic: str              # 主题/实体名（如"实验一"）
+    attributes: dict = field(default_factory=dict)  # 结构化属性
+    source: str = ""         # 来源文档
+    confidence: float = 1.0  # 提取置信度
+
+
+@dataclass
 class AgentTrace:
     """单个 Agent 的执行轨迹"""
     task_id: str = ""                   # 关联 TaskGraph 中的任务 ID
-    agent: str = ""                     # "Knowledge" / "Analysis" / "Generator" / "Critic"
+    agent: str = ""                     # "Retrieval" / "Extractor" / "Analysis" / "Generator" / "Critic"
     start_time: str = ""
     end_time: str = ""
     tools_called: list[str] = field(default_factory=list)

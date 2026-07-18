@@ -22,7 +22,6 @@ class AnalysisAgent(BaseAgent):
     capability = AgentCapability(
         name="analysis",
         description="数据分析，求和、排名",
-        inputs=["evidence"],
         outputs={
             "analysis": AnalysisResult,
         },
@@ -36,7 +35,7 @@ class AnalysisAgent(BaseAgent):
     def __init__(self, rag_engine: RAGEngine):
         self.engine = rag_engine
 
-    async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "") -> AgentContext:
+    async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "", **kwargs) -> AgentContext:
         tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["calculate_sum", "calculate_rank"])
 
         system_prompt = PromptManager.get("analysis", "system")

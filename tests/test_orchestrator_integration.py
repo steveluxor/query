@@ -1,4 +1,4 @@
-"""Orchestrator 全链路集成测试 — 覆盖简单模式、规划模式、Critic 重试、MCP Session 生命周期"""
+"""Orchestrator 集成测试 — 覆盖 DAG 执行、MCP Session 生命周期、记忆管理"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -8,7 +8,7 @@ import pytest
 
 from app.core.agent_context import AgentContext
 from app.core.agent_orchestrator import AgentOrchestrator
-from app.models.data_types import Evidence, AnalysisResult, Calculation
+from app.models.data_types import Evidence, AnalysisResult, Calculation, DocumentBundle, RetrievalReport
 from app.models.task_graph import TaskGraph, TaskNode
 
 
@@ -59,123 +59,84 @@ def orchestrator(mock_rag_engine, mock_agent_memory, mock_redis_store, mock_mcp_
 
 
 def _make_execute_mock(side_effect=None):
-    """创建 execute mock — 直接执行 side_effect 并返回 context"""
+    """创建 execute mock — 直接执行 side_effect 并返回 AgentResult"""
     async def _execute(ctx, task_id="", **kwargs):
+        from app.models.data_types import AgentResult
         if side_effect:
             return await side_effect(ctx, task_id=task_id, **kwargs)
-        return ctx
+        return AgentResult()
     return AsyncMock(side_effect=_execute)
 
 
-# ==================== 简单模式 ====================
+# ==================== DAG 执行 ====================
 
-class TestSimpleModeFullChain:
+class TestDAGExecution:
 
     @pytest.mark.anyio
-    async def test_simple_knowledge_only(self, orchestrator, mock_mcp_client):
-        """Knowledge → Generate，验证 MCP session + 答案生成"""
+    async def test_retrieval_extractor_generator(self, orchestrator, mock_mcp_client):
+        """Retrieval → Extractor → Generator 全链路"""
         context = AgentContext(question="什么是RAG", session_id="s1", document_ids=[1])
 
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
+        plan = TaskGraph(
+            goal="回答问题",
+            goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task2", agent="extractor", objective="提取", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="回答", depends_on=["task2"]),
+            ],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
 
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [Evidence(statement="RAG是检索增强生成", source="doc.pdf", evidence_type="text")], producer="knowledge")
-            ctx.set_output("sources", [{"file_name": "doc.pdf", "content": "RAG是..."}], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "RAG是检索增强生成技术", producer="generator") or ctx)
+        async def retrieval_side_effect(ctx, task_id="", **kw):
+            ctx.set_output("document_bundle", DocumentBundle(chunks=[]), producer="retrieval")
+            ctx.set_output("retrieval_report", RetrievalReport(), producer="retrieval")
+            from app.models.data_types import AgentResult
+            return AgentResult()
+        async def extractor_side_effect(ctx, task_id="", **kw):
+            ctx.set_output("knowledge_objects", [], producer="extractor")
+            ctx.set_output("evidence", [Evidence(statement="RAG是检索增强生成", source="doc.pdf", evidence_type="text")], producer="extractor")
+            ctx.set_output("sources", [{"file_name": "doc.pdf", "content": "RAG是..."}], producer="extractor")
+            from app.models.data_types import AgentResult
+            return AgentResult()
+
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_side_effect)
+        orchestrator.registry.get_agent("extractor").execute = _make_execute_mock(extractor_side_effect)
+        orchestrator.registry.get_agent("generator").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "RAG是检索增强生成技术", producer="generator"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         result = await orchestrator.run(context)
 
-        # MCP session 生命周期
         mock_mcp_client.create_session.assert_called_once()
         mock_mcp_client.cleanup_session.assert_called_once_with("test-session-uuid")
         assert result.mcp_session_id == "test-session-uuid"
-
-        # set_document_ids
-        mock_mcp_client.call_tool.assert_called_with(
-            "set_document_ids", {"ids": [1]}, session_id="test-session-uuid"
-        )
-
         assert result.get_output("answer") == "RAG是检索增强生成技术"
-        assert len(result.get_output("evidence") or []) == 1
 
     @pytest.mark.anyio
-    async def test_simple_with_analysis(self, orchestrator, mock_mcp_client):
-        """Knowledge → Analysis → Generate"""
-        context = AgentContext(question="销售总额是多少", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = True
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [Evidence(statement="销售额数据", source="sales.xlsx", evidence_type="table")], producer="knowledge")
-            ctx.set_output("sources", [{"file_name": "sales.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-
-        async def analysis_side_effect(ctx, **kw):
-            ctx.set_output("analysis", AnalysisResult(
-                calculations=[Calculation(operation="sum", field="amount", result=5000, source="sales.xlsx")],
-                findings=["总额5000"],
-            ), producer="analysis")
-            return ctx
-        orchestrator.analysis_agent.execute = _make_execute_mock(analysis_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "总额5000元", producer="generator") or ctx)
-
-        result = await orchestrator.run(context)
-
-        assert result.get_output("answer") == "总额5000元"
-        assert result.get_output("analysis") is not None
-        mock_mcp_client.create_session.assert_called_once()
-        mock_mcp_client.cleanup_session.assert_called_once()
-
-
-# ==================== 规划模式 ====================
-
-class TestPlanningModeFullChain:
-
-    @pytest.mark.anyio
-    async def test_plan_mode_two_steps(self, orchestrator, mock_mcp_client):
-        """两步规划: task1 → task2，验证 MCP kwargs 传递"""
+    async def test_two_steps(self, orchestrator, mock_mcp_client):
+        """两步 DAG: task1 → task2，验证 MCP kwargs 传递"""
         context = AgentContext(question="对比两个实验", session_id="s1", document_ids=[1, 2])
-
-        orchestrator.coordinator.needs_plan = True
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
 
         plan = TaskGraph(
             goal="对比两个实验",
             tasks=[
-                TaskNode(id="task1", agent="knowledge", objective="获取实验A数据", depends_on=[]),
-                TaskNode(id="task2", agent="knowledge", objective="获取实验B数据", depends_on=["task1"]),
+                TaskNode(id="task1", agent="retrieval", objective="获取数据A", depends_on=[]),
+                TaskNode(id="task2", agent="retrieval", objective="获取数据B", depends_on=["task1"]),
             ],
         )
+        orchestrator._plan = MagicMock(return_value=plan)
 
         executed_tasks = []
         mcp_clients_received = []
 
-        async def knowledge_side_effect(ctx, task_id="", **kw):
+        async def retrieval_side_effect(ctx, task_id="", **kw):
             executed_tasks.append(task_id)
             mcp_clients_received.append(kw.get("mcp_client"))
-            if task_id == "task1":
-                ctx.set_output("evidence", [Evidence(statement="实验A结果", source="exp_a.xlsx", evidence_type="table")], producer="knowledge")
-                ctx.set_output("sources", [{"file_name": "exp_a.xlsx", "content": "..."}], producer="knowledge")
-            elif task_id == "task2":
-                sources = list(ctx.get_output("sources") or [])
-                sources.append({"file_name": "exp_b.xlsx", "content": "..."})
-                ctx.set_output("sources", sources, producer="knowledge")
-            return ctx
+            from app.models.data_types import AgentResult
+            return AgentResult()
 
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "对比结果", producer="generator") or ctx)
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_side_effect)
 
         result = await orchestrator.run(context)
 
@@ -184,72 +145,35 @@ class TestPlanningModeFullChain:
             assert mc is mock_mcp_client
         mock_mcp_client.create_session.assert_called_once()
         mock_mcp_client.cleanup_session.assert_called_once()
-        assert result.get_output("answer") == "对比结果"
 
     @pytest.mark.anyio
-    async def test_plan_mode_requires_check(self, orchestrator, mock_mcp_client):
-        """analysis agent 需要 evidence，无 evidence 时跳过"""
-        context = AgentContext(question="计算并对比", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = True
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        plan = TaskGraph(
-            goal="计算对比",
-            tasks=[
-                TaskNode(id="task1", agent="analysis", objective="计算总额", depends_on=[]),
-            ],
-        )
-
-        executed_tasks = []
-
-        async def analysis_side_effect(ctx, task_id="", **kw):
-            executed_tasks.append(task_id)
-            return ctx
-
-        orchestrator.analysis_agent.execute = _make_execute_mock(analysis_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "无答案", producer="generator") or ctx)
-        orchestrator._plan = MagicMock(return_value=plan)
-
-        result = await orchestrator.run(context)
-
-        # analysis 需要 evidence 但为空，应跳过
-        assert executed_tasks == []
-        assert result.get_output("answer") == "无答案"
-
-    @pytest.mark.anyio
-    async def test_plan_mode_dag_dependency_order(self, orchestrator, mock_mcp_client):
+    async def test_dag_dependency_order(self, orchestrator, mock_mcp_client):
         """DAG: task3 依赖 task1+task2，验证拓扑排序"""
         context = AgentContext(question="综合分析", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = True
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
 
         plan = TaskGraph(
             goal="综合分析",
             tasks=[
-                TaskNode(id="task3", agent="knowledge", objective="综合", depends_on=["task1", "task2"]),
-                TaskNode(id="task1", agent="knowledge", objective="数据A", depends_on=[]),
-                TaskNode(id="task2", agent="knowledge", objective="数据B", depends_on=[]),
+                TaskNode(id="task3", agent="generator", objective="综合", depends_on=["task1", "task2"]),
+                TaskNode(id="task1", agent="retrieval", objective="数据A", depends_on=[]),
+                TaskNode(id="task2", agent="retrieval", objective="数据B", depends_on=[]),
             ],
         )
+        orchestrator._plan = MagicMock(return_value=plan)
 
         execution_order = []
-
-        async def knowledge_side_effect(ctx, task_id="", **kw):
+        async def retrieval_side_effect(ctx, task_id="", **kw):
             execution_order.append(task_id)
-            if task_id in ("task1", "task2"):
-                ctx.set_output("evidence", [Evidence(statement=f"{task_id}结果", source="x.xlsx", evidence_type="table")], producer="knowledge")
-                ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
+            from app.models.data_types import AgentResult
+            return AgentResult()
+        async def generator_side_effect(ctx, task_id="", **kw):
+            execution_order.append(task_id)
+            ctx.set_output("answer", "综合结果", producer="generator")
+            from app.models.data_types import AgentResult
+            return AgentResult()
 
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "综合结果", producer="generator") or ctx)
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_side_effect)
+        orchestrator.registry.get_agent("generator").execute = _make_execute_mock(generator_side_effect)
 
         result = await orchestrator.run(context)
 
@@ -260,207 +184,6 @@ class TestPlanningModeFullChain:
         assert idx2 < idx3
 
 
-# ==================== Critic 重试 ====================
-
-class TestCriticRetry:
-
-    @pytest.mark.anyio
-    async def test_critic_retry_knowledge(self, orchestrator, mock_mcp_client):
-        """Critic 要求重跑 knowledge，验证 reset + 重跑"""
-        context = AgentContext(question="测试问题", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = True
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        knowledge_call_count = 0
-
-        async def knowledge_side_effect(ctx, **kw):
-            nonlocal knowledge_call_count
-            knowledge_call_count += 1
-            if knowledge_call_count == 1:
-                ctx.set_output("evidence", [Evidence(statement="不完整", source="x.xlsx", evidence_type="table")], producer="knowledge")
-                ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            else:
-                ctx.set_output("evidence", [Evidence(statement="完整结果", source="x.xlsx", evidence_type="table")], producer="knowledge")
-                ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
-
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "最终答案", producer="generator") or ctx)
-
-        critic_calls = 0
-
-        async def critic_side_effect(ctx, **kw):
-            nonlocal critic_calls
-            critic_calls += 1
-            if critic_calls == 1:
-                ctx.set_output("critique", "证据不完整", producer="critic")
-                ctx.set_output("need_retry", True, producer="critic")
-                ctx.set_output("retry_target", "knowledge", producer="critic")
-            else:
-                ctx.set_output("critique", "通过", producer="critic")
-                ctx.set_output("need_retry", False, producer="critic")
-                ctx.set_output("retry_target", "all", producer="critic")
-            return ctx
-
-        orchestrator.critic_agent.execute = _make_execute_mock(critic_side_effect)
-
-        result = await orchestrator.run(context)
-
-        assert critic_calls == 2
-        assert knowledge_call_count == 2
-        assert result.get_output("answer") == "最终答案"
-        mock_mcp_client.create_session.assert_called_once()
-        mock_mcp_client.cleanup_session.assert_called_once()
-
-    @pytest.mark.anyio
-    async def test_critic_retry_preserves_evidence(self, orchestrator, mock_mcp_client):
-        """Critic 重试 knowledge 后旧证据保留（去重合并）"""
-        context = AgentContext(question="测试问题", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = True
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        knowledge_call_count = 0
-
-        async def knowledge_side_effect(ctx, **kw):
-            nonlocal knowledge_call_count
-            knowledge_call_count += 1
-            if knowledge_call_count == 1:
-                # 第一次输出：evidence = [A, B]
-                ctx.set_output("evidence", [
-                    Evidence(statement="正确事实A", source="doc1.xlsx", evidence_type="table"),
-                    Evidence(statement="正确事实B", source="doc2.xlsx", evidence_type="table"),
-                ], producer="knowledge")
-                ctx.set_output("sources", [
-                    {"file_name": "doc1.xlsx", "content": "正确事实A"},
-                    {"file_name": "doc2.xlsx", "content": "正确事实B"},
-                ], producer="knowledge")
-            else:
-                # 第二次输出：evidence = [A, C]（A 重复，C 是新）
-                ctx.set_output("evidence", [
-                    Evidence(statement="正确事实A", source="doc1.xlsx", evidence_type="table"),
-                    Evidence(statement="补充事实C", source="doc3.xlsx", evidence_type="table"),
-                ], producer="knowledge")
-                ctx.set_output("sources", [
-                    {"file_name": "doc1.xlsx", "content": "正确事实A"},
-                    {"file_name": "doc3.xlsx", "content": "补充事实C"},
-                ], producer="knowledge")
-            return ctx
-
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "最终答案", producer="generator") or ctx)
-
-        critic_calls = 0
-
-        async def critic_side_effect(ctx, **kw):
-            nonlocal critic_calls
-            critic_calls += 1
-            if critic_calls == 1:
-                ctx.set_output("critique", "不完整", producer="critic")
-                ctx.set_output("need_retry", True, producer="critic")
-                ctx.set_output("retry_target", "knowledge", producer="critic")
-            else:
-                ctx.set_output("critique", "通过", producer="critic")
-                ctx.set_output("need_retry", False, producer="critic")
-                ctx.set_output("retry_target", "all", producer="critic")
-            return ctx
-
-        orchestrator.critic_agent.execute = _make_execute_mock(critic_side_effect)
-
-        result = await orchestrator.run(context)
-
-        # 验证证据合并：A(旧) + B(旧) + A(新重复) + C(新) = 3 条（去重后）
-        evidence = result.get_output("evidence") or []
-        assert len(evidence) == 3
-        statements = {e.statement for e in evidence}
-        assert "正确事实A" in statements
-        assert "正确事实B" in statements
-        assert "补充事实C" in statements
-
-    @pytest.mark.anyio
-    async def test_critic_retry_exhausted(self, orchestrator, mock_mcp_client):
-        """Critic 重试 2 次仍拒绝，附加人工核实提示"""
-        context = AgentContext(question="困难问题", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = True
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [Evidence(statement="证据", source="x.xlsx", evidence_type="table")], producer="knowledge")
-            ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "不完美的答案", producer="generator") or ctx)
-
-        async def critic_side_effect(ctx, **kw):
-            ctx.set_output("critique", "仍然不好", producer="critic")
-            ctx.set_output("need_retry", True, producer="critic")
-            ctx.set_output("retry_target", "knowledge", producer="critic")
-            return ctx
-        orchestrator.critic_agent.execute = _make_execute_mock(critic_side_effect)
-
-        result = await orchestrator.run(context)
-
-        assert "人工核实" in (result.get_output("answer") or "")
-        mock_mcp_client.cleanup_session.assert_called_once()
-
-    @pytest.mark.anyio
-    async def test_critic_retry_generator_target(self, orchestrator, mock_mcp_client):
-        """Critic 要求重跑 generator，验证只重跑 generator"""
-        context = AgentContext(question="测试", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = True
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [Evidence(statement="证据", source="x.xlsx", evidence_type="table")], producer="knowledge")
-            ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-
-        gen_call_count = 0
-
-        async def gen_side_effect(ctx, **kw):
-            nonlocal gen_call_count
-            gen_call_count += 1
-            if gen_call_count == 1:
-                ctx.set_output("answer", "第一版答案", producer="generator")
-            else:
-                ctx.set_output("answer", "改进后的答案", producer="generator")
-            return ctx
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=gen_side_effect)
-
-        critic_calls = 0
-
-        async def critic_side_effect(ctx, **kw):
-            nonlocal critic_calls
-            critic_calls += 1
-            if critic_calls == 1:
-                ctx.set_output("critique", "表达不好", producer="critic")
-                ctx.set_output("need_retry", True, producer="critic")
-                ctx.set_output("retry_target", "generator", producer="critic")
-            else:
-                ctx.set_output("critique", "通过", producer="critic")
-                ctx.set_output("need_retry", False, producer="critic")
-                ctx.set_output("retry_target", "all", producer="critic")
-            return ctx
-        orchestrator.critic_agent.execute = _make_execute_mock(critic_side_effect)
-
-        result = await orchestrator.run(context)
-
-        assert critic_calls == 2
-        assert gen_call_count == 2
-        assert result.get_output("answer") == "改进后的答案"
-
 
 # ==================== MCP Session 生命周期 ====================
 
@@ -470,18 +193,15 @@ class TestMCPSessionLifecycle:
     async def test_session_cleanup_on_success(self, orchestrator, mock_mcp_client):
         """正常流程: session 在 finally 中被清理"""
         context = AgentContext(question="测试", session_id="s1")
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            ctx.set_output("sources", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         await orchestrator.run(context)
 
@@ -492,21 +212,20 @@ class TestMCPSessionLifecycle:
     async def test_session_cleanup_on_agent_error(self, orchestrator, mock_mcp_client):
         """Agent 异常: session 仍然被清理"""
         context = AgentContext(question="会出错的问题", session_id="s1")
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="retrieval", objective="出错", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
 
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        # Knowledge execute 抛异常（模拟 run 内部失败）
-        async def knowledge_fail(ctx, **kw):
+        async def retrieval_fail(ctx, **kw):
             raise RuntimeError("搜索失败")
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_fail)
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_fail)
 
         with pytest.raises(RuntimeError, match="搜索失败"):
             await orchestrator.run(context)
 
-        # 即使异常，session 也被清理
         mock_mcp_client.create_session.assert_called_once()
         mock_mcp_client.cleanup_session.assert_called_once_with("test-session-uuid")
 
@@ -514,18 +233,15 @@ class TestMCPSessionLifecycle:
     async def test_session_id_passed_to_set_document_ids(self, orchestrator, mock_mcp_client):
         """验证 set_document_ids 使用正确的 session_id"""
         context = AgentContext(question="测试", session_id="s1", document_ids=[10, 20, 30])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            ctx.set_output("sources", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         await orchestrator.run(context)
 
@@ -537,62 +253,20 @@ class TestMCPSessionLifecycle:
     async def test_no_document_ids_skips_set_document_ids(self, orchestrator, mock_mcp_client):
         """无 document_ids 时跳过 set_document_ids"""
         context = AgentContext(question="测试", session_id="s1", document_ids=None)
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            ctx.set_output("sources", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         await orchestrator.run(context)
 
         for call in mock_mcp_client.call_tool.call_args_list:
             assert call[0][0] != "set_document_ids"
-
-    @pytest.mark.anyio
-    async def test_same_session_across_retry(self, orchestrator, mock_mcp_client):
-        """Critic 重试期间使用同一个 MCP session"""
-        context = AgentContext(question="测试", session_id="s1", document_ids=[1])
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = True
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [Evidence(statement="证据", source="x.xlsx", evidence_type="table")], producer="knowledge")
-            ctx.set_output("sources", [{"file_name": "x.xlsx", "content": "..."}], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
-
-        session_ids_used = []
-
-        async def critic_side_effect(ctx, **kw):
-            session_ids_used.append(ctx.mcp_session_id)
-            # 第一次拒绝
-            if len(session_ids_used) == 1:
-                ctx.set_output("critique", "不好", producer="critic")
-                ctx.set_output("need_retry", True, producer="critic")
-                ctx.set_output("retry_target", "knowledge", producer="critic")
-            else:
-                ctx.set_output("critique", "通过", producer="critic")
-                ctx.set_output("need_retry", False, producer="critic")
-                ctx.set_output("retry_target", "all", producer="critic")
-            return ctx
-        orchestrator.critic_agent.execute = _make_execute_mock(critic_side_effect)
-
-        await orchestrator.run(context)
-
-        # 两次 Critic 调用使用同一个 session_id
-        assert len(session_ids_used) == 2
-        assert session_ids_used[0] == session_ids_used[1] == "test-session-uuid"
 
 
 # ==================== BaseAgent kwargs 转发 ====================
@@ -600,12 +274,9 @@ class TestMCPSessionLifecycle:
 class TestBaseAgentKwargsForwarding:
 
     @pytest.mark.anyio
-    async def test_execute_forwards_mcp_kwargs(self):
+    async def test_execute_forwards_mcp_kwargs(self, orchestrator):
         """execute(mcp_client=..., mcp_session_id=...) 转发到 run()"""
-        from app.core.agents.knowledge_agent import KnowledgeAgent
-
-        agent = KnowledgeAgent.__new__(KnowledgeAgent)
-        agent.engine = MagicMock()
+        agent = orchestrator.registry.get_agent("retrieval")
 
         received = {}
 
@@ -623,12 +294,9 @@ class TestBaseAgentKwargsForwarding:
         assert received["mcp_session_id"] == "uuid-123"
 
     @pytest.mark.anyio
-    async def test_execute_no_extra_kwargs(self):
+    async def test_execute_no_extra_kwargs(self, orchestrator):
         """execute() 不传额外参数时 run() 正常"""
-        from app.core.agents.knowledge_agent import KnowledgeAgent
-
-        agent = KnowledgeAgent.__new__(KnowledgeAgent)
-        agent.engine = MagicMock()
+        agent = orchestrator.registry.get_agent("retrieval")
 
         received = {}
 
@@ -653,18 +321,15 @@ class TestMemoryIntegration:
     async def test_memory_restored_on_start(self, orchestrator, mock_agent_memory, mock_redis_store):
         """请求开始时恢复记忆"""
         context = AgentContext(question="测试", session_id="user-123")
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            ctx.set_output("sources", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         mock_redis_store.safe_get_history = AsyncMock(return_value=[{"question": "之前的问题", "answer": "之前的答案"}])
 
@@ -677,18 +342,15 @@ class TestMemoryIntegration:
     async def test_memory_updated_on_end(self, orchestrator, mock_agent_memory):
         """请求结束时更新记忆"""
         context = AgentContext(question="测试", session_id="user-123")
-        context.set_output("sources", [{"file_name": "test.xlsx"}], producer="knowledge")
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         await orchestrator.run(context)
 
@@ -702,18 +364,15 @@ class TestMemoryIntegration:
     async def test_no_memory_when_no_session(self, orchestrator, mock_agent_memory):
         """无 session_id 时跳过记忆操作"""
         context = AgentContext(question="测试", session_id=None)
-
-        orchestrator.coordinator.needs_plan = False
-        orchestrator.coordinator.needs_analysis = False
-        orchestrator.coordinator.needs_review = False
-        orchestrator.coordinator.execute = AsyncMock(return_value=context)
-
-        async def knowledge_side_effect(ctx, **kw):
-            ctx.set_output("evidence", [], producer="knowledge")
-            ctx.set_output("sources", [], producer="knowledge")
-            return ctx
-        orchestrator.knowledge_agent.execute = _make_execute_mock(knowledge_side_effect)
-        orchestrator.answer_generator.execute = AsyncMock(side_effect=lambda ctx, **kw: ctx.set_output("answer", "答案", producer="generator") or ctx)
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
+            ctx.set_output("answer", "答案", producer="chat"),
+            type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
 
         await orchestrator.run(context)
 

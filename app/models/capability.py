@@ -27,7 +27,6 @@ class AgentCapability:
     """
     name: str
     description: str = ""
-    inputs: list[str] = field(default_factory=list)
     outputs: dict[str, Any] = field(default_factory=dict)
     tools: list[str] = field(default_factory=list)
     merge_policy: dict[str, str] = field(default_factory=dict)

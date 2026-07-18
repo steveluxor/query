@@ -19,7 +19,6 @@ class CriticAgent(ControllerAgent):
     capability = AgentCapability(
         name="critic",
         description="答案质量审核，评估准确性、完整性、来源引用、逻辑一致性",
-        inputs=["answer", "retrieval_report"],
         outputs={
             "critique": str,
             "need_retry": bool,
@@ -46,11 +45,22 @@ class CriticAgent(ControllerAgent):
         target = context.get_output("retry_target", "all")
         return [ControlAction(action_type="retry", target_task_id=target)]
 
-    async def run(self, context: AgentContext) -> AgentContext:
+    async def run(self, context: AgentContext, **kwargs) -> AgentContext:
         import time
         start = time.time()
 
-        prompt = self._build_prompt(context)
+        evidence_list = kwargs.get("evidence", [])
+        analysis_obj = kwargs.get("analysis")
+        answer_str = kwargs.get("answer", "")
+        retrieval_report_obj = kwargs.get("retrieval_report")
+
+        prompt = self._build_prompt(
+            context=context,
+            evidence_list=evidence_list,
+            analysis_obj=analysis_obj,
+            answer_str=answer_str,
+            retrieval_report_obj=retrieval_report_obj,
+        )
 
         try:
             result = self.llm.invoke([("human", prompt)])
@@ -78,16 +88,13 @@ class CriticAgent(ControllerAgent):
             start_time=str(int(start * 1000)),
             end_time=str(int(time.time() * 1000)),
             tools_called=[],
-            input_summary=f"evidence={len(context.get_output('evidence') or [])}",
+            input_summary=f"evidence={len(evidence_list)}",
             output_summary=f"score={critic_result.score}, retry={critic_result.need_retry}",
         ))
 
         return context
 
-    def _build_prompt(self, context: AgentContext) -> str:
-        evidence_list = context.get_output("evidence") or []
-        analysis_obj = context.get_output("analysis")
-        answer_str = context.get_output("answer") or ""
+    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_obj=None, answer_str="", retrieval_report_obj=None) -> str:
 
         # 格式化 evidence
         if evidence_list:
@@ -121,7 +128,6 @@ class CriticAgent(ControllerAgent):
             task_plan = "  无（简单模式）"
 
         # 格式化检索完整性报告
-        retrieval_report_obj = context.get_output("retrieval_report")
         if retrieval_report_obj:
             report_text = (
                 f"  sources: {retrieval_report_obj.sources}\n"

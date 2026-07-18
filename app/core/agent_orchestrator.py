@@ -8,7 +8,7 @@ from app.core.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
 from app.core.prompt_manager import PromptManager
 from app.core.agent_registry import create_default_registry
-from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator
+from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator, DAGDataFlowValidator
 from app.exceptions import PlannerError, WorkflowValidationError
 from app.models.task_graph import TaskGraph, TaskNode, TaskStatus
 
@@ -33,6 +33,7 @@ class AgentOrchestrator:
         self.workflow_validator = WorkflowValidator()
         self.policy_validator = PolicyValidator()
         self.goal_validator = GoalValidator()
+        self.dag_dataflow_validator = DAGDataFlowValidator()
         self.registry = create_default_registry(rag_engine=rag_engine)
 
         # Action Registry（ControlAction 分发，新增 action type 只需注册 Handler）
@@ -153,11 +154,40 @@ class AgentOrchestrator:
             task.status = TaskStatus.SKIPPED
             return
 
-        # 校验前置条件
-        if cap.inputs and not context.has_all_outputs(cap.inputs):
-            logger.warning("[Orchestrator] 跳过 %s: 缺少 %s", task.id, cap.inputs)
-            task.status = TaskStatus.SKIPPED
-            return
+        # 按 input_mapping 从指定上游 task 获取数据
+        upstream_kwargs = {}
+        if task.input_mapping:
+            # 显式 input_mapping：精确取指定 task+key
+            for param_name, source_ref in task.input_mapping.items():
+                if "." not in source_ref:
+                    logger.warning("[Orchestrator] %s: input_mapping['%s']='%s' 缺少 task_id. 前缀，跳过",
+                                   task.id, param_name, source_ref)
+                    continue
+                source_task_id, output_key = source_ref.split(".", 1)
+                entry = context.get_output_entry(output_key, task_id=source_task_id)
+                if entry and entry.value is not None:
+                    upstream_kwargs[param_name] = entry.value
+        else:
+            # 回退：input_mapping 为空时，BFS 遍历全部上游祖先注入 outputs
+            visited = set()
+            queue = list(task.depends_on)
+            while queue:
+                dep_id = queue.pop(0)
+                if dep_id in visited:
+                    continue
+                visited.add(dep_id)
+                dep_node = next((t for t in (context.plan.tasks if context.plan else []) if t.id == dep_id), None)
+                if not dep_node:
+                    continue
+                dep_cap = self.registry.get(dep_node.agent)
+                if dep_cap:
+                    for output_key in dep_cap.output_keys:
+                        entry = context.get_output_entry(output_key, task_id=dep_id)
+                        if entry and entry.value is not None:
+                            upstream_kwargs[output_key] = entry.value
+                for ancestor in dep_node.depends_on:
+                    if ancestor not in visited:
+                        queue.append(ancestor)
 
         context.current_task_id = task.id
         _task_id_var.set(task.id)
@@ -167,6 +197,7 @@ class AgentOrchestrator:
             result = await agent.execute(
                 context, task_id=task.id,
                 mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
+                **upstream_kwargs,
             )
 
             # outputs → context（由 Runtime 写入，Agent 只管返回）
@@ -235,6 +266,7 @@ class AgentOrchestrator:
                 objective=t.get("objective", ""),
                 depends_on=t.get("depends_on", []),
                 output_key=t.get("output_key", ""),
+                input_mapping=t.get("input_mapping", {}),
             ))
         return TaskGraph(
             goal=data.get("goal", ""),
@@ -244,17 +276,23 @@ class AgentOrchestrator:
 
     @staticmethod
     def _fallback_plan(question: str) -> TaskGraph:
-        """Planner 失败时生成单任务兜底计划"""
+        """Planner 失败时生成兜底计划：非问候类先检索再生成"""
         lower = question.strip().lower()
         greeting_keywords = ("你好", "hello", "hi", "嗨", "喂", "您好")
         if any(kw in lower for kw in greeting_keywords):
-            agent = "chat"
-        else:
-            agent = "generator"
+            return TaskGraph(
+                goal="",
+                goal_outputs=["answer"],
+                tasks=[TaskNode(id="task1", agent="chat", objective=question)],
+            )
         return TaskGraph(
             goal="",
             goal_outputs=["answer"],
-            tasks=[TaskNode(id="task1", agent=agent, objective=question)],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective=question),
+                TaskNode(id="task2", agent="extractor", objective=question, depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective=question, depends_on=["task2"]),
+            ],
         )
 
     def _validate_task_graph(self, plan: TaskGraph) -> bool:
@@ -266,6 +304,7 @@ class AgentOrchestrator:
             errors += self.policy_validator.validate_controller_usage(plan, self.registry)
             errors += self.goal_validator.validate_goal_capability(plan, self.registry)
             errors += self.goal_validator.validate_goal_reachability(plan, self.registry)
+            errors += self.dag_dataflow_validator.validate_input_mapping(plan, self.registry)
         for err in errors:
             logger.warning("[Orchestrator] TaskGraph 校验失败: %s", err)
         return len(errors) == 0
