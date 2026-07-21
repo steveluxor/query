@@ -98,6 +98,23 @@ class AgentContext:
         if policy == "replace":
             return values[-1]
 
+        # DocumentBundle 合并（按 chunks 合并）
+        if all(hasattr(v, 'chunks') for v in values):
+            merged_chunks = []
+            for v in values:
+                merged_chunks.extend(v.chunks)
+            if policy == "dedup":
+                seen = set()
+                result = []
+                for c in merged_chunks:
+                    dk = (c.source, c.content[:200])
+                    if dk not in seen:
+                        seen.add(dk)
+                        result.append(c)
+                merged_chunks = result
+            from app.models.data_types import DocumentBundle
+            return DocumentBundle(chunks=merged_chunks)
+
         if isinstance(values[0], list):
             merged = []
             for v in values:

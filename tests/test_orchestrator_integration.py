@@ -377,3 +377,143 @@ class TestMemoryIntegration:
         await orchestrator.run(context)
 
         mock_agent_memory.update.assert_not_called()
+
+
+# ==================== Critic 重试集成测试 ====================
+
+class TestCriticRetry:
+
+    @pytest.mark.anyio
+    async def test_critic_retry_by_agent_name(self, orchestrator, mock_mcp_client):
+        """Critic 返回 retry_target='retrieval' → 仅 retrieval 及其下游被重试"""
+        context = AgentContext(question="测试", session_id="s1")
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task2", agent="extractor", objective="提取", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="生成", depends_on=["task2"]),
+                TaskNode(id="task4", agent="critic", objective="审核", depends_on=["task3"]),
+            ],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+
+        # 统计各 agent 执行次数
+        call_counts = {"retrieval": 0, "extractor": 0, "generator": 0, "critic": 0}
+
+        from app.models.data_types import AgentResult
+
+        async def retrieval_side_effect(ctx, task_id="", **kw):
+            call_counts["retrieval"] += 1
+            ctx.set_output("document_bundle", MagicMock(chunks=[]), producer="retrieval")
+            ctx.set_output("retrieval_report", MagicMock(), producer="retrieval")
+            return AgentResult()
+
+        async def extractor_side_effect(ctx, task_id="", **kw):
+            call_counts["extractor"] += 1
+            ctx.set_output("knowledge_objects", [], producer="extractor")
+            ctx.set_output("evidence", [], producer="extractor")
+            ctx.set_output("sources", [], producer="extractor")
+            return AgentResult()
+
+        async def generator_side_effect(ctx, task_id="", **kw):
+            call_counts["generator"] += 1
+            ctx.set_output("answer", "答案", producer="generator")
+            return AgentResult()
+
+        async def critic_side_effect(ctx, task_id="", **kw):
+            call_counts["critic"] += 1
+            # 第一次执行时返回 need_retry=true + ControlAction
+            if call_counts["critic"] == 1:
+                ctx.set_output("need_retry", True, producer="critic")
+                ctx.set_output("retry_target", "retrieval", producer="critic")
+                from app.models.control import ControlAction
+                return AgentResult(actions=[ControlAction(action_type="retry", target_task_id="retrieval")])
+            else:
+                ctx.set_output("need_retry", False, producer="critic")
+                ctx.set_output("retry_target", "all", producer="critic")
+                return AgentResult()
+
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_side_effect)
+        orchestrator.registry.get_agent("extractor").execute = _make_execute_mock(extractor_side_effect)
+        orchestrator.registry.get_agent("generator").execute = _make_execute_mock(generator_side_effect)
+        orchestrator.registry.get_agent("critic").execute = _make_execute_mock(critic_side_effect)
+
+        result = await orchestrator.run(context)
+
+        # retrieval 和 extractor 应执行 2 次（首次 + 重试）
+        assert call_counts["retrieval"] == 2, f"retrieval 应执行2次，实际{call_counts['retrieval']}"
+        assert call_counts["extractor"] == 2, f"extractor 应执行2次，实际{call_counts['extractor']}"
+        # generator 应执行 2 次（首次 + 重试）
+        assert call_counts["generator"] == 2, f"generator 应执行2次，实际{call_counts['generator']}"
+        # critic 仅首次执行（发起 retry 后自身状态被保留）
+        assert call_counts["critic"] == 1, f"critic 应执行1次，实际{call_counts['critic']}"
+
+        assert result.get_output("answer") == "答案"
+
+    @pytest.mark.anyio
+    async def test_critic_retry_generator_only(self, orchestrator, mock_mcp_client):
+        """Critic 返回 retry_target='generator' → 只重试 generator"""
+        context = AgentContext(question="测试", session_id="s1")
+        plan = TaskGraph(
+            goal="测试",
+            goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task2", agent="extractor", objective="提取", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="生成", depends_on=["task2"]),
+                TaskNode(id="task4", agent="critic", objective="审核", depends_on=["task3"]),
+            ],
+        )
+        orchestrator._plan = MagicMock(return_value=plan)
+
+        call_counts = {"retrieval": 0, "extractor": 0, "generator": 0, "critic": 0}
+
+        from app.models.data_types import AgentResult
+
+        async def retrieval_side_effect(ctx, task_id="", **kw):
+            call_counts["retrieval"] += 1
+            ctx.set_output("document_bundle", MagicMock(chunks=[]), producer="retrieval")
+            ctx.set_output("retrieval_report", MagicMock(), producer="retrieval")
+            return AgentResult()
+
+        async def extractor_side_effect(ctx, task_id="", **kw):
+            call_counts["extractor"] += 1
+            ctx.set_output("knowledge_objects", [], producer="extractor")
+            ctx.set_output("evidence", [], producer="extractor")
+            ctx.set_output("sources", [], producer="extractor")
+            return AgentResult()
+
+        async def generator_side_effect(ctx, task_id="", **kw):
+            call_counts["generator"] += 1
+            ctx.set_output("answer", "答案", producer="generator")
+            return AgentResult()
+
+        async def critic_side_effect(ctx, task_id="", **kw):
+            call_counts["critic"] += 1
+            if call_counts["critic"] == 1:
+                ctx.set_output("need_retry", True, producer="critic")
+                ctx.set_output("retry_target", "generator", producer="critic")
+                from app.models.control import ControlAction
+                return AgentResult(actions=[ControlAction(action_type="retry", target_task_id="generator")])
+            else:
+                ctx.set_output("need_retry", False, producer="critic")
+                ctx.set_output("retry_target", "all", producer="critic")
+                return AgentResult()
+
+        orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_side_effect)
+        orchestrator.registry.get_agent("extractor").execute = _make_execute_mock(extractor_side_effect)
+        orchestrator.registry.get_agent("generator").execute = _make_execute_mock(generator_side_effect)
+        orchestrator.registry.get_agent("critic").execute = _make_execute_mock(critic_side_effect)
+
+        result = await orchestrator.run(context)
+
+        # 只有 generator 被重试，retrieval 和 extractor 不受影响
+        assert call_counts["retrieval"] == 1, f"retrieval 应执行1次，实际{call_counts['retrieval']}"
+        assert call_counts["extractor"] == 1, f"extractor 应执行1次，实际{call_counts['extractor']}"
+        assert call_counts["generator"] == 2, f"generator 应执行2次，实际{call_counts['generator']}"
+        # critic 仅首次执行（发起 retry 后自身状态被保留）
+        assert call_counts["critic"] == 1, f"critic 应执行1次，实际{call_counts['critic']}"
+
+        assert result.get_output("answer") == "答案"

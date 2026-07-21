@@ -36,15 +36,16 @@ async def set_document_ids(session_id: str, ids: list[int]) -> str:
 
 
 @mcp.tool()
-async def search_documents(session_id: str, query: str, row_start: int | None = None, row_end: int | None = None, task_id: str = "") -> str:
+async def search_documents(session_id: str, query: str, strategy: str = "standard",
+                           row_start: int | None = None, row_end: int | None = None, task_id: str = "") -> str:
     """从知识库中搜索与问题相关的文档内容。需要查找具体信息、数据、记录时调用。搜索词应具体，包含数据中可能的列名。
     如果要查询特定行号范围（如"第90到100行"、"第91行之后"），请传入 row_start 和 row_end 参数。"""
-    logger.info("[MCP] search_documents (session=%s, task=%s): query='%s', row_start=%s, row_end=%s",
-                session_id[:8], task_id or "-", query, row_start, row_end)
+    logger.info("[MCP] search_documents (session=%s, task=%s): query='%s', strategy=%s, row_start=%s, row_end=%s",
+                session_id[:8], task_id or "-", query, strategy, row_start, row_end)
 
     session = await session_mgr.get(session_id)
     ctx = SearchContext(document_ids=session.document_ids)
-    raw_result = rag_engine._execute_search(query, row_start, row_end, ctx)
+    raw_result = rag_engine._execute_search(query, row_start, row_end, ctx, strategy=strategy)
 
     # 缓存状态到 per-session（按 task_id 隔离，并发 task 互不影响）
     if task_id:

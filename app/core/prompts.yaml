@@ -82,6 +82,9 @@ extractor:
     - 对每个文档，先识别文档主题（topic），再提取结构化属性（attributes）
     - 如果文档不包含某属性的信息，attributes 中 omit 该 key 而非填空值
     - 属性值可以是字符串、列表或数字
+    - 属性值应使用完整的句子描述，确保信息完整可读，不要只写关键词
+    - 每个文档至少提取 3-5 个关键属性，覆盖主题、方法、结果/结论等维度
+    - 如果文档内容较长，务必覆盖开头、中间、结尾的关键信息，不要遗漏后半部分
     - 只输出 JSON，不要任何自然语言
     - JSON 字符串值中的双引号必须使用 \" 转义
 
@@ -181,10 +184,10 @@ critic:
     返回 JSON：
     - {{"score": 8, "problems": [], "need_retry": false, "retry_target": "all"}} — 答案合格
     - {{"score": 4, "problems": ["缺少来源引用"], "need_retry": true, "retry_target": "generator"}} — 需要修改
-    - {{"score": 3, "problems": ["证据覆盖度不足: is_complete=false，数据不完整"], "need_retry": true, "retry_target": "knowledge"}} — 需要重新检索
+    - {{"score": 3, "problems": ["证据覆盖度不足"], "need_retry": true, "retry_target": "retrieval"}} — 需要重新检索
 
     retry_target 取值：
-    - "knowledge": 证据提取有问题，需要重新检索
+    - "retrieval": 检索阶段有问题，需要重新搜索文档
     - "analysis": 计算/分析有问题，需要重新分析
     - "generator": 表达有问题，只需要重新生成回答
     - "all": 严重问题，需要全部重来
@@ -213,25 +216,37 @@ planner:
     - Controller Agent 是可选的，只在需要验证、高风险、质量重要时使用
     - Controller 的 control_action 由 Agent 运行时决定，Planner 只负责安排 Controller 节点
     - 默认最多生成5个task，只有真正需要多步的复杂任务才拆分
-    - **input_mapping**: 定义本任务从上游 task 获取哪些数据。key 是 Agent 参数名，value 是 "source_task_id.output_key" 格式的全限定引用。例如需要上游 task1 产出的 evidence，写 "evidence": "task1.evidence"
-    - 下游 task 只消费 input_mapping 中声明的数据，不会自动收到上游所有产出
+    - **port_bindings**（必须）: 定义本 task 的输入端口与上游 task output 的绑定关系。key 是 Agent 输入端口名，value 是 "source_task_id.output_key" 格式的全限定引用。例如 extractor 的 knowledge_document 端口绑定 task1 的 document_bundle 输出："knowledge_document": "task1.document_bundle"
+    - 下游 task 只消费 port_bindings 中声明的数据，不会自动收到上游任何数据
     - 最终回答必须由 generator 或 chat agent 产出 "answer"
     - 每个 DAG 至少有一个 task 能产出 goal_outputs 中声明的所有 key（如 generator 的 outputs 包含 "answer"）
     - analysis agent 只能做数值计算（求和、排名），不能用于文本对比或综合分析
     - 文本对比/汇总/综合类任务应由 generator agent 完成
 
-    并行 DAG 示例（多个独立分支 + 合并）：
+    顺序 DAG 示例（对比/综合类任务——确保数据完整性）：
     {
       "goal": "对比两个实验的差异",
       "goal_outputs": ["answer"],
       "tasks": [
-        {"id": "task1", "agent": "retrieval", "objective": "获取实验A的数据", "depends_on": []},
-        {"id": "task2", "agent": "retrieval", "objective": "获取实验B的数据", "depends_on": []},
-        {"id": "task3", "agent": "extractor", "objective": "从实验A和B中提取结构化信息", "depends_on": ["task1", "task2"], "input_mapping": {"document_bundle": "task1.document_bundle"}},
-        {"id": "task4", "agent": "generator", "objective": "对比实验A和B的差异并生成回答", "depends_on": ["task3"]}
+        {"id": "task1", "agent": "retrieval", "objective": "搜索所有相关实验文档", "depends_on": []},
+        {"id": "task2", "agent": "extractor", "objective": "从所有实验文档中提取结构化信息", "depends_on": ["task1"],
+         "port_bindings": {"knowledge_document": "task1.document_bundle"}},
+        {"id": "task3", "agent": "generator", "objective": "对比实验差异并生成回答", "depends_on": ["task2"],
+         "port_bindings": {"structured_knowledge": "task2.knowledge_objects", "evidence_list": "task2.evidence", "source_meta": "task2.sources"}}
       ]
     }
-    上例中 task1 和 task2 互不依赖，可并行执行。task3（extractor）通过 input_mapping 获取上游的 document_bundle。task4（generator）通过 BFS 自动注入获取 extractor 的 evidence/knowledge_objects。
+
+    并行 DAG 示例（独立分支互不依赖——不能有数据传递）：
+    {
+      "goal": "查看文档数量和销售总额",
+      "goal_outputs": ["answer"],
+      "tasks": [
+        {"id": "task1", "agent": "retrieval", "objective": "查看所有文档名称", "depends_on": []},
+        {"id": "task2", "agent": "analysis", "objective": "计算销售总额", "depends_on": []},
+        {"id": "task3", "agent": "generator", "objective": "汇总文档数量和销售总额", "depends_on": ["task1", "task2"]}
+      ]
+    }
+    上例中 task1 和 task2 互不依赖，可并行执行。task3（generator）的输入由两个上游提供。
 
     goal_outputs 是当前 DAG 需要产出的最终输出 key 列表，通常为 ["answer"]。
     DAG 中所有 task 的产出必须能覆盖 goal_outputs。
@@ -242,16 +257,17 @@ planner:
       "goal_outputs": ["answer"],
       "tasks": [
         {"id": "task1", "agent": "retrieval", "objective": "搜索相关文档", "depends_on": []},
-        {"id": "task2", "agent": "extractor", "objective": "从文档中提取结构化信息", "depends_on": ["task1"]},
-        {"id": "task3", "agent": "generator", "objective": "生成回答", "depends_on": ["task2"]}
+        {"id": "task2", "agent": "extractor", "objective": "从文档中提取结构化信息", "depends_on": ["task1"],
+         "port_bindings": {"knowledge_document": "task1.document_bundle"}},
+        {"id": "task3", "agent": "generator", "objective": "生成回答", "depends_on": ["task2"],
+         "port_bindings": {"structured_knowledge": "task2.knowledge_objects", "evidence_list": "task2.evidence", "source_meta": "task2.sources"}}
       ]
     }
 
-    input_mapping 说明：
-    - key=本 task Agent 的参数名（如 document_bundle、evidence）
+    port_bindings 说明：
+    - key=Agent 输入端口名（声明在 Agent 的 inputs 中）
     - value="source_task_id.output_key"（来源 task 的 ID + 该 task 的 output key）
-    - 如果下游 task 的输入参数名与上游 output_key 一致，可以不写 input_mapping（BFS 自动注入）
-    - 如果参数名不同（如 extractor 的 document_bundle 参数），必须显式写 input_mapping
+    - 所有 task 间的数据传递必须通过 port_bindings 显式声明，不存在自动注入
 
 replanner:
   system: |

@@ -5,7 +5,7 @@ import re
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
 from app.core.llm_factory import create_llm
-from app.models.capability import AgentCapability, AgentRole
+from app.models.capability import AgentCapability
 from app.models.data_types import DocumentBundle, DocumentChunk, RetrievalReport
 
 logger = logging.getLogger(__name__)
@@ -24,30 +24,36 @@ class RetrievalAgent(BaseAgent):
         },
         tools=[],
         merge_policy={"document_bundle": "append"},
-        role=AgentRole.EXECUTOR,
     )
 
     QUERY_PROMPT = (
-        "你是一个搜索关键词生成器。根据用户问题，生成一个最可能找到相关文档的搜索关键词。\n"
-        "要求：\n"
-        "- 只返回关键词本身，不要任何解释、标点、引号\n"
-        "- 如果用户问题本身就是合适的关键词，直接返回原文\n"
-        "- 关键词应包含数据中可能的列名或文档标题\n\n"
+        "你是一个搜索策略分析器。根据用户问题判断查询类型并生成搜索关键词。\n\n"
+        '"aggregation" — 只用于明确的数值求和(总共/合计/总计)、排名(最贵/最便宜/第N)、'
+        "行号范围(第X到Y行/前N行)。需要单个文档的数据。\n"
+        "  例如：\"2024总销售额\"、\"最贵的商品\"、\"第100到120行\"、\"前10名\"\n\n"
+        '"comparison" — 除 aggregation 外的所有其他问题。包括对比差异、查询某人/事的信息、'
+        "总结归纳、列举文档等。需要多个文档的数据。\n"
+        "  例如：\"对比一下几个实验\"、\"汪小丹干了什么\"、\"总结所有实验\"、\"有哪些文档\"\n\n"
+        "注意：不确认时一律选 comparison。只有明确是数值加总或排序才选 aggregation。\n\n"
+        "返回 JSON：\n"
+        '{{"type": "aggregation", "query": "关键词"}}\n'
+        '{{"type": "comparison", "query": "关键词"}}\n\n'
         "用户问题：{question}"
     )
 
     async def run(self, context: AgentContext, mcp_client=None, mcp_session_id: str = "", **kwargs) -> AgentContext:
         question = context.question
 
-        # 1. LLM 生成搜索词（单次调用，temperature=0）
-        search_query = await self._generate_query(question)
-        logger.info("[Retrieval] 搜索词: %s", search_query)
+        # 1. LLM 生成搜索词 + 查询类型（单次调用，temperature=0）
+        search_query, query_type = await self._generate_query(question)
+        logger.info("[Retrieval] 搜索词: %s, 类型: %s", search_query, query_type)
 
-        # 2. 搜索（代码控制）
+        # 2. 按策略搜索（aggregation→strict 单文档, comparison→standard 多文档）
+        strategy = "strict" if query_type == "aggregation" else "standard"
         search_text = ""
         full_text = ""
         try:
-            raw = await mcp_client.call_tool("search_documents", {"query": search_query}, session_id=mcp_session_id)
+            raw = await mcp_client.call_tool("search_documents", {"query": search_query, "strategy": strategy}, session_id=mcp_session_id)
             raw_str = str(raw)
             # 解析 JSON 包装
             try:
@@ -84,16 +90,23 @@ class RetrievalAgent(BaseAgent):
 
         return context
 
-    async def _generate_query(self, question: str) -> str:
-        """LLM 从用户问题生成搜索关键词"""
-        llm = create_llm(temperature=0, max_tokens=100)
+    async def _generate_query(self, question: str) -> tuple[str, str]:
+        """LLM 从用户问题生成搜索关键词和查询类型"""
+        llm = create_llm(temperature=0, max_tokens=200)
         try:
             prompt = self.QUERY_PROMPT.format(question=question)
             result = await llm.ainvoke([("human", prompt)])
-            return result.content.strip().strip('"\'')
+            raw = result.content.strip()
+            try:
+                data = json.loads(raw)
+                query = data.get("query", question).strip('"\'')
+                query_type = data.get("type", "comparison")
+                return query, query_type
+            except (json.JSONDecodeError, TypeError):
+                return raw.strip('"\''), "comparison"
         except Exception as e:
             logger.warning("[Retrieval] query 生成失败，使用原始问题: %s", e)
-            return question
+            return question, "comparison"
 
     def _parse_document_bundle(self, search_text: str, full_text: str) -> DocumentBundle:
         """从 search + read_all_rows 结果解析为 DocumentBundle"""

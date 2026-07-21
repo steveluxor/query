@@ -440,7 +440,7 @@ class RAGEngine:
     # ==================== Tool 执行体 ====================
 
     def _execute_search(self, query: str, row_start: int | None = None, row_end: int | None = None,
-                        ctx: SearchContext | None = None) -> str:
+                        ctx: SearchContext | None = None, strategy: str = "standard") -> str:
         """执行向量搜索，返回格式化后的文档内容供 LLM 读取，同时缓存原始结果供聚合工具使用"""
         logger.info("执行搜索: query='%s', row_start=%s, row_end=%s", query, row_start, row_end)
         ctx = ctx or SearchContext()
@@ -534,6 +534,15 @@ class RAGEngine:
                             logger.info("文件名补充(embedding漏掉): %s", doc.metadata.get("file_name", ""))
 
         selected.sort(key=lambda x: x[1])
+
+        # strict 策略：折叠到得分最高的单一文档（聚合查询用）
+        if strategy == "strict" and selected:
+            best_doc_id = selected[0][0].metadata.get("document_id")
+            selected = [(doc, score) for doc, score in selected
+                        if doc.metadata.get("document_id") == best_doc_id]
+            selected.sort(key=lambda x: x[1])
+            logger.info("[strict 策略] 折叠到文档 %s, 共 %d 个 chunk", best_doc_id, len(selected))
+
         ctx.last_search_chunks = selected
         ctx.last_search_filtered = filtered
         ctx.last_search_all_chunks = []  # 搜索新内容时清除缓存，确保后续全量加载使用最新搜索的文档

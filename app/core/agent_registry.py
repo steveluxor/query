@@ -1,6 +1,6 @@
 import logging
 
-from app.models.capability import AgentCapability, AgentRole
+from app.models.capability import AgentCapability
 from app.models.task_graph import TaskGraph
 
 logger = logging.getLogger(__name__)
@@ -36,17 +36,15 @@ class AgentRegistry:
     def valid_names(self) -> set[str]:
         return set(self._capabilities.keys())
 
-    # ==================== 按角色查找 ====================
-
-    def find_by_role(self, role: AgentRole) -> list[AgentCapability]:
-        """查找指定角色的所有 Agent"""
-        return [cap for cap in self._capabilities.values() if cap.role == role]
+    # ==================== 按类型查找 ====================
 
     def find_executors(self) -> list[AgentCapability]:
-        return self.find_by_role(AgentRole.EXECUTOR)
+        """查找所有 Executor Agent（无 control_actions 的普通数据节点）"""
+        return [cap for cap in self._capabilities.values() if not cap.control_actions]
 
     def find_controllers(self) -> list[AgentCapability]:
-        return self.find_by_role(AgentRole.CONTROLLER)
+        """查找所有 Controller Agent（有 control_actions 的控制节点）"""
+        return [cap for cap in self._capabilities.values() if cap.control_actions]
 
     # ==================== 按能力查找 ====================
 

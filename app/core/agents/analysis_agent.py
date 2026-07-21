@@ -10,7 +10,7 @@ from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
 from app.core.prompt_manager import PromptManager
 from app.models.data_types import AnalysisResult, Calculation
-from app.models.capability import AgentCapability, AgentRole
+from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,6 @@ class AnalysisAgent(BaseAgent):
         merge_policy={
             "analysis": "replace",
         },
-        role=AgentRole.EXECUTOR,
     )
 
     def __init__(self, rag_engine: RAGEngine):

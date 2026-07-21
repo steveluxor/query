@@ -154,40 +154,17 @@ class AgentOrchestrator:
             task.status = TaskStatus.SKIPPED
             return
 
-        # 按 input_mapping 从指定上游 task 获取数据
+        # 按 port_bindings 从指定上游 task 获取数据（唯一数据通道，无 BFS 回退）
         upstream_kwargs = {}
-        if task.input_mapping:
-            # 显式 input_mapping：精确取指定 task+key
-            for param_name, source_ref in task.input_mapping.items():
-                if "." not in source_ref:
-                    logger.warning("[Orchestrator] %s: input_mapping['%s']='%s' 缺少 task_id. 前缀，跳过",
-                                   task.id, param_name, source_ref)
-                    continue
-                source_task_id, output_key = source_ref.split(".", 1)
-                entry = context.get_output_entry(output_key, task_id=source_task_id)
-                if entry and entry.value is not None:
-                    upstream_kwargs[param_name] = entry.value
-        else:
-            # 回退：input_mapping 为空时，BFS 遍历全部上游祖先注入 outputs
-            visited = set()
-            queue = list(task.depends_on)
-            while queue:
-                dep_id = queue.pop(0)
-                if dep_id in visited:
-                    continue
-                visited.add(dep_id)
-                dep_node = next((t for t in (context.plan.tasks if context.plan else []) if t.id == dep_id), None)
-                if not dep_node:
-                    continue
-                dep_cap = self.registry.get(dep_node.agent)
-                if dep_cap:
-                    for output_key in dep_cap.output_keys:
-                        entry = context.get_output_entry(output_key, task_id=dep_id)
-                        if entry and entry.value is not None:
-                            upstream_kwargs[output_key] = entry.value
-                for ancestor in dep_node.depends_on:
-                    if ancestor not in visited:
-                        queue.append(ancestor)
+        for port_name, source_ref in task.port_bindings.items():
+            if "." not in source_ref:
+                logger.warning("[Orchestrator] %s: port_bindings['%s']='%s' 缺少 task_id. 前缀，跳过",
+                               task.id, port_name, source_ref)
+                continue
+            source_task_id, output_key = source_ref.split(".", 1)
+            entry = context.get_output_entry(output_key, task_id=source_task_id)
+            if entry and entry.value is not None:
+                upstream_kwargs[port_name] = entry.value
 
         context.current_task_id = task.id
         _task_id_var.set(task.id)
@@ -266,7 +243,7 @@ class AgentOrchestrator:
                 objective=t.get("objective", ""),
                 depends_on=t.get("depends_on", []),
                 output_key=t.get("output_key", ""),
-                input_mapping=t.get("input_mapping", {}),
+                port_bindings=t.get("port_bindings", {}),
             ))
         return TaskGraph(
             goal=data.get("goal", ""),
@@ -290,8 +267,16 @@ class AgentOrchestrator:
             goal_outputs=["answer"],
             tasks=[
                 TaskNode(id="task1", agent="retrieval", objective=question),
-                TaskNode(id="task2", agent="extractor", objective=question, depends_on=["task1"]),
-                TaskNode(id="task3", agent="generator", objective=question, depends_on=["task2"]),
+                TaskNode(id="task2", agent="extractor", objective=question,
+                         depends_on=["task1"],
+                         port_bindings={"knowledge_document": "task1.document_bundle"}),
+                TaskNode(id="task3", agent="generator", objective=question,
+                         depends_on=["task2"],
+                         port_bindings={
+                             "structured_knowledge": "task2.knowledge_objects",
+                             "evidence_list": "task2.evidence",
+                             "source_meta": "task2.sources",
+                         }),
             ],
         )
 
@@ -304,7 +289,7 @@ class AgentOrchestrator:
             errors += self.policy_validator.validate_controller_usage(plan, self.registry)
             errors += self.goal_validator.validate_goal_capability(plan, self.registry)
             errors += self.goal_validator.validate_goal_reachability(plan, self.registry)
-            errors += self.dag_dataflow_validator.validate_input_mapping(plan, self.registry)
+            errors += self.dag_dataflow_validator.validate_port_bindings(plan, self.registry)
         for err in errors:
             logger.warning("[Orchestrator] TaskGraph 校验失败: %s", err)
         return len(errors) == 0

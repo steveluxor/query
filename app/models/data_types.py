@@ -47,7 +47,7 @@ class CriticResult:
     score: int = 10                     # 1-10
     problems: list[str] = field(default_factory=list)
     need_retry: bool = False
-    retry_target: str = "all"           # "knowledge" / "analysis" / "generator" / "all"
+    retry_target: str = "all"           # "retrieval" / "analysis" / "generator" / "all"
 
 
 @dataclass

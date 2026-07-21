@@ -5,8 +5,8 @@ from app.config import settings
 from app.core.agents.base_agent import ControllerAgent
 from app.core.agent_context import AgentContext
 from app.core.prompt_manager import PromptManager
-from app.models.data_types import CriticResult, AgentTrace
-from app.models.capability import AgentCapability, AgentRole
+from app.models.data_types import CriticResult, AgentTrace, AnalysisResult, RetrievalReport
+from app.models.capability import AgentCapability
 from app.models.control import ControlAction
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,13 @@ class CriticAgent(ControllerAgent):
     capability = AgentCapability(
         name="critic",
         description="答案质量审核，评估准确性、完整性、来源引用、逻辑一致性",
+        inputs={
+            "evidence_list": list,
+            "generated_answer": str,
+            "retrieval_report": RetrievalReport,
+            "analysis_result": AnalysisResult | None,
+        },
+        required_inputs={"evidence_list", "generated_answer", "retrieval_report"},
         outputs={
             "critique": str,
             "need_retry": bool,
@@ -29,7 +36,6 @@ class CriticAgent(ControllerAgent):
             "need_retry": "replace",
             "retry_target": "replace",
         },
-        role=AgentRole.CONTROLLER,
         control_actions=["retry"],
         control_outputs=["need_retry", "retry_target"],
     )
@@ -49,21 +55,21 @@ class CriticAgent(ControllerAgent):
         import time
         start = time.time()
 
-        evidence_list = kwargs.get("evidence", [])
-        analysis_obj = kwargs.get("analysis")
-        answer_str = kwargs.get("answer", "")
-        retrieval_report_obj = kwargs.get("retrieval_report")
+        evidences = kwargs.get("evidence_list", [])
+        analysis = kwargs.get("analysis_result")
+        answer = kwargs.get("generated_answer", "")
+        report = kwargs.get("retrieval_report")
 
         prompt = self._build_prompt(
             context=context,
-            evidence_list=evidence_list,
-            analysis_obj=analysis_obj,
-            answer_str=answer_str,
-            retrieval_report_obj=retrieval_report_obj,
+            evidence_list=evidences,
+            analysis_result=analysis,
+            generated_answer=answer,
+            retrieval_report=report,
         )
 
         try:
-            result = self.llm.invoke([("human", prompt)])
+            result = await self.llm.ainvoke([("human", prompt)])
             critic_result = self._parse_result(result.content)
         except Exception as e:
             logger.warning("[Critic] LLM 调用失败: %s", e)
@@ -88,13 +94,13 @@ class CriticAgent(ControllerAgent):
             start_time=str(int(start * 1000)),
             end_time=str(int(time.time() * 1000)),
             tools_called=[],
-            input_summary=f"evidence={len(evidence_list)}",
+            input_summary=f"evidence={len(evidences)}",
             output_summary=f"score={critic_result.score}, retry={critic_result.need_retry}",
         ))
 
         return context
 
-    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_obj=None, answer_str="", retrieval_report_obj=None) -> str:
+    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_result=None, generated_answer="", retrieval_report=None) -> str:
 
         # 格式化 evidence
         if evidence_list:
@@ -105,14 +111,14 @@ class CriticAgent(ControllerAgent):
             evidence_text = "  无"
 
         # 格式化 analysis
-        if analysis_obj:
+        if analysis_result:
             parts = []
-            if analysis_obj.calculations:
+            if analysis_result.calculations:
                 parts.append("计算：" + ", ".join(
-                    f"{c.operation}({c.field})={c.result}" for c in analysis_obj.calculations
+                    f"{c.operation}({c.field})={c.result}" for c in analysis_result.calculations
                 ))
-            if analysis_obj.findings:
-                parts.append("发现：" + "; ".join(analysis_obj.findings))
+            if analysis_result.findings:
+                parts.append("发现：" + "; ".join(analysis_result.findings))
             analysis_text = "  " + "\n  ".join(parts) if parts else "  无"
         else:
             analysis_text = "  无"
@@ -128,14 +134,14 @@ class CriticAgent(ControllerAgent):
             task_plan = "  无（简单模式）"
 
         # 格式化检索完整性报告
-        if retrieval_report_obj:
+        if retrieval_report:
             report_text = (
-                f"  sources: {retrieval_report_obj.sources}\n"
-                f"  total_chunks: {retrieval_report_obj.total_chunks}\n"
-                f"  returned_chunks: {retrieval_report_obj.returned_chunks}\n"
-                f"  is_complete: {retrieval_report_obj.is_complete}\n"
-                f"  read_all_rows_called: {retrieval_report_obj.read_all_rows_called}\n"
-                f"  searches_performed: {retrieval_report_obj.searches_performed}"
+                f"  sources: {retrieval_report.sources}\n"
+                f"  total_chunks: {retrieval_report.total_chunks}\n"
+                f"  returned_chunks: {retrieval_report.returned_chunks}\n"
+                f"  is_complete: {retrieval_report.is_complete}\n"
+                f"  read_all_rows_called: {retrieval_report.read_all_rows_called}\n"
+                f"  searches_performed: {retrieval_report.searches_performed}"
             )
         else:
             report_text = "  无"
@@ -144,7 +150,7 @@ class CriticAgent(ControllerAgent):
             question=context.question,
             evidence=evidence_text,
             analysis=analysis_text,
-            answer=answer_str,
+            answer=generated_answer,
             retrieval_report=report_text,
             task_plan=task_plan,
         )

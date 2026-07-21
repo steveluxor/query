@@ -107,16 +107,16 @@ class TestDAGDataFlowValidator:
             outputs={"answer": str},
         ))
 
-    def test_valid_input_mapping(self):
+    def test_valid_port_bindings(self):
         plan = TaskGraph(
             goal="test",
             tasks=[
                 TaskNode(id="t1", agent="knowledge", objective="检索"),
                 TaskNode(id="t2", agent="analysis", objective="分析",
-                         depends_on=["t1"], input_mapping={"documents": "t1.evidence"}),
+                         depends_on=["t1"], port_bindings={"documents": "t1.evidence"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert errors == []
 
     def test_missing_task_id_prefix(self):
@@ -125,10 +125,10 @@ class TestDAGDataFlowValidator:
             tasks=[
                 TaskNode(id="t1", agent="knowledge", objective="检索"),
                 TaskNode(id="t2", agent="analysis", objective="分析",
-                         depends_on=["t1"], input_mapping={"documents": "evidence"}),
+                         depends_on=["t1"], port_bindings={"documents": "evidence"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert any("缺少 task_id." in e for e in errors)
 
     def test_non_existent_source_task(self):
@@ -136,10 +136,10 @@ class TestDAGDataFlowValidator:
             goal="test",
             tasks=[
                 TaskNode(id="t1", agent="generator", objective="生成",
-                         input_mapping={"evidence": "nonexistent.evidence"}),
+                         port_bindings={"evidence": "nonexistent.evidence"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert any("不存在" in e for e in errors)
 
     def test_not_an_ancestor(self):
@@ -148,10 +148,10 @@ class TestDAGDataFlowValidator:
             tasks=[
                 TaskNode(id="t1", agent="knowledge", objective="检索"),
                 TaskNode(id="t2", agent="generator", objective="生成",
-                         input_mapping={"documents": "t1.evidence"}),
+                         port_bindings={"documents": "t1.evidence"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert any("非上游" in e for e in errors)
 
     def test_missing_output_key(self):
@@ -160,13 +160,13 @@ class TestDAGDataFlowValidator:
             tasks=[
                 TaskNode(id="t1", agent="knowledge", objective="检索"),
                 TaskNode(id="t2", agent="generator", objective="生成",
-                         depends_on=["t1"], input_mapping={"data": "t1.nonexistent"}),
+                         depends_on=["t1"], port_bindings={"data": "t1.nonexistent"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert any("无 output_key" in e for e in errors)
 
-    def test_empty_input_mapping(self):
+    def test_empty_port_bindings(self):
         plan = TaskGraph(
             goal="test",
             tasks=[
@@ -174,7 +174,7 @@ class TestDAGDataFlowValidator:
                 TaskNode(id="t2", agent="generator", objective="生成", depends_on=["t1"]),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert errors == []
 
     def test_transitive_ancestor(self):
@@ -184,13 +184,13 @@ class TestDAGDataFlowValidator:
                 TaskNode(id="t1", agent="knowledge", objective="检索"),
                 TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
                 TaskNode(id="t3", agent="generator", objective="生成",
-                         depends_on=["t2"], input_mapping={"data": "t1.evidence"}),
+                         depends_on=["t2"], port_bindings={"data": "t1.evidence"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert errors == []
 
-    def test_multiple_input_mappings(self):
+    def test_multiple_port_bindings(self):
         plan = TaskGraph(
             goal="test",
             tasks=[
@@ -198,8 +198,8 @@ class TestDAGDataFlowValidator:
                 TaskNode(id="t2", agent="analysis", objective="分析", depends_on=["t1"]),
                 TaskNode(id="t3", agent="generator", objective="生成",
                          depends_on=["t1", "t2"],
-                         input_mapping={"evidence": "t1.evidence", "analysis": "t2.analysis"}),
+                         port_bindings={"evidence": "t1.evidence", "analysis": "t2.analysis"}),
             ],
         )
-        errors = self.validator.validate_input_mapping(plan, self.registry)
+        errors = self.validator.validate_port_bindings(plan, self.registry)
         assert errors == []

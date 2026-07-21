@@ -23,9 +23,9 @@ class TaskNode:
     objective: str               # "获取2024销售数据"
     depends_on: list[str] = field(default_factory=list)
     output_key: str = ""         # 本任务输出标识，如 "sales_data"
-    input_mapping: dict[str, str] = field(default_factory=dict)
-    # 例: {"evidence": "task1.evidence"}
-    # key=本 Agent 参数名, value="source_task_id.output_key" 全限定引用
+    port_bindings: dict[str, str] = field(default_factory=dict)
+    # 例: {"evidence_list": "task1.evidence"}
+    # key=input port name, value="source_task_id.output_key" 全限定引用
     status: TaskStatus = TaskStatus.PENDING
 
 

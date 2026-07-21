@@ -7,7 +7,7 @@ from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
 from app.core.llm_factory import create_llm
 from app.core.prompt_manager import PromptManager
-from app.models.capability import AgentCapability, AgentRole
+from app.models.capability import AgentCapability
 from app.models.data_types import DocumentBundle, Evidence, KnowledgeObject
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,8 @@ class ExtractionAgent(BaseAgent):
     capability = AgentCapability(
         name="extractor",
         description="从文档中提取结构化知识对象",
+        inputs={"knowledge_document": DocumentBundle},
+        required_inputs={"knowledge_document"},
         outputs={
             "knowledge_objects": list[KnowledgeObject],
             "evidence": list[Evidence],
@@ -34,7 +36,6 @@ class ExtractionAgent(BaseAgent):
             "evidence": "dedup",
             "sources": "dedup",
         },
-        role=AgentRole.EXECUTOR,
     )
 
     FALLBACK_SYSTEM_PROMPT = (
@@ -63,8 +64,8 @@ class ExtractionAgent(BaseAgent):
         "}"
     )
 
-    async def run(self, context: AgentContext, document_bundle: DocumentBundle = None, **kwargs) -> AgentContext:
-        bundle = document_bundle or DocumentBundle(chunks=[])
+    async def run(self, context: AgentContext, knowledge_document: DocumentBundle = None, **kwargs) -> AgentContext:
+        bundle = knowledge_document or DocumentBundle(chunks=[])
         question = context.question
 
         if not bundle.chunks:

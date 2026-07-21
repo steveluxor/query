@@ -2,7 +2,7 @@ import logging
 
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.models.capability import AgentCapability, AgentRole
+from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,6 @@ class ChatAgent(BaseAgent):
         outputs={
             "answer": str,
         },
-        role=AgentRole.EXECUTOR,
     )
 
     async def run(self, context: AgentContext, **kwargs) -> AgentContext:
