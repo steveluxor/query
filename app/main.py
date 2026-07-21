@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 
 from contextlib import asynccontextmanager
 
@@ -30,9 +31,9 @@ async def lifespan(application: FastAPI):
     application.state.agent_memory = AgentMemory()
     application.state.redis_store = RedisStore()
 
-    # 初始化 MCP Client
+    # 初始化 MCP Client（使用 sys.executable 确保子进程使用同一 Python 环境）
     mcp_client = MCPClient(
-        server_command="python",
+        server_command=sys.executable,
         server_args=["-m", "app.core.mcp.server"]
     )
     await mcp_client.connect()

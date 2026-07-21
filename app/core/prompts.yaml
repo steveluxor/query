@@ -221,6 +221,8 @@ planner:
     - 最终回答必须由 generator 或 chat agent 产出 "answer"
     - 每个 DAG 至少有一个 task 能产出 goal_outputs 中声明的所有 key（如 generator 的 outputs 包含 "answer"）
     - analysis agent 只能做数值计算（求和、排名），不能用于文本对比或综合分析
+    - **analysis 必须 depends_on retrieval**：analysis 的 calculate_sum/calculate_rank 工具依赖先执行 search_documents 填充数据，不能与 retrieval 并行
+    - **数值计算问题必须使用 analysis agent**：涉及"总共/合计/花了多少钱/总金额/求和"等加总问题必须包含 analysis（calculate_sum），涉及"最贵/最便宜/排名/排序/第几"等排名问题必须包含 analysis（calculate_rank）。Generator 是纯文本 LLM 无法精确计算，不能依赖 extractor 或 generator 估算数值
     - 文本对比/汇总/综合类任务应由 generator agent 完成
 
     顺序 DAG 示例（对比/综合类任务——确保数据完整性）：
@@ -236,17 +238,21 @@ planner:
       ]
     }
 
-    并行 DAG 示例（独立分支互不依赖——不能有数据传递）：
+    组合 DAG 示例（检索→分析+提取→生成）：
     {
       "goal": "查看文档数量和销售总额",
       "goal_outputs": ["answer"],
       "tasks": [
-        {"id": "task1", "agent": "retrieval", "objective": "查看所有文档名称", "depends_on": []},
-        {"id": "task2", "agent": "analysis", "objective": "计算销售总额", "depends_on": []},
-        {"id": "task3", "agent": "generator", "objective": "汇总文档数量和销售总额", "depends_on": ["task1", "task2"]}
+        {"id": "task1", "agent": "retrieval", "objective": "搜索销售数据文档", "depends_on": []},
+        {"id": "task2", "agent": "analysis", "objective": "计算销售总额", "depends_on": ["task1"]},
+        {"id": "task3", "agent": "extractor", "objective": "提取文档结构化信息", "depends_on": ["task1"],
+         "port_bindings": {"knowledge_document": "task1.document_bundle"}},
+        {"id": "task4", "agent": "generator", "objective": "汇总数据和知识生成回答", "depends_on": ["task2", "task3"],
+         "port_bindings": {"structured_knowledge": "task3.knowledge_objects", "evidence_list": "task3.evidence",
+                          "source_meta": "task3.sources", "analysis_result": "task2.analysis"}}
       ]
     }
-    上例中 task1 和 task2 互不依赖，可并行执行。task3（generator）的输入由两个上游提供。
+    上例中 task2(analysis) 和 task3(extractor) 都依赖 task1(retrieval)，可并行执行。task4(generator) 的输入由两个上游提供。
 
     goal_outputs 是当前 DAG 需要产出的最终输出 key 列表，通常为 ["answer"]。
     DAG 中所有 task 的产出必须能覆盖 goal_outputs。

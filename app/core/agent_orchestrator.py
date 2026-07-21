@@ -73,6 +73,10 @@ class AgentOrchestrator:
                 logger.warning("[Orchestrator] Planner 异常: %s，使用 fallback 计划", e)
                 plan = self._fallback_plan(context.question)
 
+            # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
+            if plan and plan.tasks:
+                plan = self._post_process_plan(plan, context.question, context.memory_context)
+
             if plan and plan.tasks:
                 context.plan = plan
                 await self._execute_plan(context, plan)
@@ -279,6 +283,72 @@ class AgentOrchestrator:
                          }),
             ],
         )
+
+    def _post_process_plan(self, plan: TaskGraph, question: str, memory_context: str | None) -> TaskGraph:
+        """Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
+
+        1. 数值问题（求和/排名）必须包含 analysis agent
+        2. 短追问且 memory_context 有上下文 → chat 改为正常流程
+        """
+        lower_q = question.strip().lower()
+        has_analysis = any(t.agent == "analysis" for t in plan.tasks)
+        has_chat = any(t.agent == "chat" for t in plan.tasks)
+
+        # === 规则 1：数值问题强制包含 analysis ===
+        sum_keywords = ("花了多少钱", "总共", "合计", "总金额", "总和", "求和", "sum", "total",
+                        "花了多少", "一共")
+        rank_keywords = ("最贵", "最便宜", "排名", "排序", "第", "最高", "最低", "rank", "top")
+
+        needs_sum = any(kw in lower_q for kw in sum_keywords)
+        needs_rank = any(kw in lower_q for kw in rank_keywords)
+
+        if (needs_sum or needs_rank) and not has_analysis:
+            logger.info("[Orchestrator] 检测到数值问题但无 analysis，自动修正 plan")
+            retrieval_task = next((t for t in plan.tasks if t.agent == "retrieval"), None)
+            if not retrieval_task:
+                max_id = len(plan.tasks) + 1
+                analysis_task = TaskNode(
+                    id=f"task{max_id}", agent="analysis",
+                    objective=question, depends_on=[],
+                )
+                plan.tasks.append(analysis_task)
+            else:
+                max_id = len(plan.tasks) + 1
+                analysis_task = TaskNode(
+                    id=f"task{max_id}", agent="analysis",
+                    objective=question,
+                    depends_on=[retrieval_task.id],
+                )
+                plan.tasks.append(analysis_task)
+
+                generator_task = next((t for t in plan.tasks if t.agent == "generator"), None)
+                if generator_task:
+                    if analysis_task.id not in generator_task.depends_on:
+                        generator_task.depends_on.append(analysis_task.id)
+                    if "analysis_result" not in generator_task.port_bindings:
+                        generator_task.port_bindings["analysis_result"] = f"{analysis_task.id}.analysis"
+
+        # === 规则 2：短追问继承上下文（防止返回问候） ===
+        if has_chat and memory_context:
+            greeting_keywords = ("你好", "hello", "hi", "嗨", "喂", "您好")
+            is_pure_greeting = any(kw in lower_q for kw in greeting_keywords)
+            if not is_pure_greeting and len(question) < 10:
+                logger.info("[Orchestrator] 短追问但非纯问候，移除 chat agent")
+                plan.tasks = [t for t in plan.tasks if t.agent != "chat"]
+                if not plan.tasks:
+                    return self._fallback_plan(question)
+
+        # === 规则 3：文档/数据查询类不应使用 chat ===
+        if has_chat:
+            doc_keywords = ("有哪些文档", "列出文档", "什么文档", "所有文档", "文档列表",
+                            "有什么数据", "有哪些数据", "查一下", "搜索")
+            if any(kw in lower_q for kw in doc_keywords):
+                logger.info("[Orchestrator] 文档查询类问题，移除 chat agent")
+                plan.tasks = [t for t in plan.tasks if t.agent != "chat"]
+                if not plan.tasks:
+                    return self._fallback_plan(question)
+
+        return plan
 
     def _validate_task_graph(self, plan: TaskGraph) -> bool:
         errors = []
