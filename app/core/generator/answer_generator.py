@@ -21,7 +21,7 @@ class AnswerGenerator(BaseAgent):
         inputs={
             "structured_knowledge": list[KnowledgeObject],
             "evidence_list": list[Evidence],
-            "source_meta": list,
+            "source_meta": list[dict],
             "analysis_result": AnalysisResult | None,
         },
         required_inputs={"structured_knowledge", "evidence_list", "source_meta"},
