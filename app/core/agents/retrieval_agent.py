@@ -22,7 +22,11 @@ class RetrievalAgent(BaseAgent):
             "document_bundle": DocumentBundle,
             "retrieval_report": RetrievalReport,
         },
-        tools=[],
+        tools=["search_documents", "read_all_rows"],
+        tool_descriptions={
+            "search_documents": "文档检索",
+            "read_all_rows": "读取完整数据",
+        },
         merge_policy={"document_bundle": "append"},
     )
 
@@ -38,14 +42,16 @@ class RetrievalAgent(BaseAgent):
         "返回 JSON：\n"
         '{{"type": "aggregation", "query": "关键词"}}\n'
         '{{"type": "comparison", "query": "关键词"}}\n\n'
+        "{history}"
         "用户问题：{question}"
     )
 
     async def run(self, context: AgentContext, mcp_client=None, mcp_session_id: str = "", **kwargs) -> AgentContext:
         question = context.question
+        original_question = kwargs.get("original_question", question)
 
         # 1. LLM 生成搜索词 + 查询类型（单次调用，temperature=0）
-        search_query, query_type = await self._generate_query(question)
+        search_query, query_type = await self._generate_query(question, context.history, original_question=original_question)
         logger.info("[Retrieval] 搜索词: %s, 类型: %s", search_query, query_type)
 
         # 2. 按策略搜索（aggregation→strict 单文档, comparison→standard 多文档）
@@ -90,23 +96,45 @@ class RetrievalAgent(BaseAgent):
 
         return context
 
-    async def _generate_query(self, question: str) -> tuple[str, str]:
+    async def _generate_query(self, question: str, history: list | None = None, original_question: str | None = None) -> tuple[str, str]:
         """LLM 从用户问题生成搜索关键词和查询类型"""
+        history_text = ""
+        if history and len(history) > 0:
+            last = history[-1]
+            if hasattr(last, "question"):
+                q, a = last.question, getattr(last, "answer", "")
+            else:
+                q, a = last.get("question", ""), last.get("answer", "")
+            history_text = f"上一轮对话：\n用户: {str(q)[:200]}\n助手: {str(a)[:500]}\n\n"
+
         llm = create_llm(temperature=0, max_tokens=200)
         try:
-            prompt = self.QUERY_PROMPT.format(question=question)
+            prompt = self.QUERY_PROMPT.format(question=question, history=history_text)
             result = await llm.ainvoke([("human", prompt)])
             raw = result.content.strip()
             try:
                 data = json.loads(raw)
                 query = data.get("query", question).strip('"\'')
                 query_type = data.get("type", "comparison")
-                return query, query_type
             except (json.JSONDecodeError, TypeError):
-                return raw.strip('"\''), "comparison"
+                query = raw.strip('"\'')
+                query_type = "comparison"
         except Exception as e:
             logger.warning("[Retrieval] query 生成失败，使用原始问题: %s", e)
-            return question, "comparison"
+            query = question
+            query_type = "comparison"
+
+        # 代码层兜底：仅在 Planner 改写问题时用原始问题检测求和/排名关键词
+        sum_kw = ("花了多少钱", "总共", "合计", "总金额", "总和", "求和", "sum", "total", "花了多少", "一共")
+        rank_kw = ("最贵", "最便宜", "排名", "排序", "最高", "最低", "rank", "top")
+        if original_question is not None and original_question != question:
+            detect_question = original_question.strip().lower()
+            if any(kw in detect_question for kw in sum_kw + rank_kw):
+                query_type = "aggregation"
+                if original_question not in query:
+                    query = f"{original_question} {query}"
+
+        return query, query_type
 
     def _parse_document_bundle(self, search_text: str, full_text: str) -> DocumentBundle:
         """从 search + read_all_rows 结果解析为 DocumentBundle"""
@@ -134,6 +162,7 @@ class RetrievalAgent(BaseAgent):
                 m = re.match(r'^\[(.+?)\]\s*\n(.*)', seg, re.DOTALL)
                 if m:
                     source = m.group(1).strip()
+                    source = re.sub(r'^文件:\s*', '', source)  # 统一 "文件: 账.xlsx" → "账.xlsx"
                     content = m.group(2).strip()
                     dedup_key = (source, content[:200])
                     if content and dedup_key not in seen:

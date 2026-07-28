@@ -36,6 +36,10 @@ class ExtractionAgent(BaseAgent):
             "evidence": "dedup",
             "sources": "dedup",
         },
+        dedup_key_func={
+            "evidence": lambda item: (getattr(item, 'source', ''), getattr(item, 'statement', '')[:200]),
+            "sources": lambda item: (item.get("file_name", "") if isinstance(item, dict) else "", str(item)[:200]),
+        },
     )
 
     FALLBACK_SYSTEM_PROMPT = (
@@ -43,6 +47,7 @@ class ExtractionAgent(BaseAgent):
         "规则：\n"
         "- 对当前文档，先识别文档主题，再提取其结构化属性\n"
         "- 如果文档不包含某属性的信息，omit 该 key 而非填空值\n"
+        "- **对于表格/行数据（如 Excel 格式的账单、清单），每行提取为一个独立的知识对象**，attributes 包含该行的所有列值\n"
         "- 只输出 JSON，不要任何自然语言\n\n"
         "输出格式：\n"
         "{\n"
@@ -115,8 +120,8 @@ class ExtractionAgent(BaseAgent):
         return list(groups.items())
 
     async def _extract_single_source(self, source: str, chunks: list, question: str) -> tuple[list[KnowledgeObject], list[Evidence]]:
-        """对单个文档执行 LLM 提取"""
-        doc_text = self._format_single_doc(source, chunks)
+        """对单个文档执行 LLM 提取，大文档自动分批并行处理"""
+        batch_size = 15
 
         system_prompt = self.FALLBACK_SYSTEM_PROMPT
         try:
@@ -124,25 +129,53 @@ class ExtractionAgent(BaseAgent):
         except Exception:
             pass
 
-        user_prompt = f"用户问题：{question}\n\n文档内容（{source}）：\n{doc_text}"
+        llm = create_llm(temperature=0, max_tokens=8192, timeout=120)
 
-        llm = create_llm(temperature=0, max_tokens=8192)
-        try:
-            result = await llm.ainvoke([
-                ("system", system_prompt),
-                ("human", user_prompt),
-            ])
+        # 创建所有批次的任务（并行执行，用 semaphore 限制并发数防限流）
+        sem = asyncio.Semaphore(5)
+        batch_tasks = []
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            batch_tasks.append(self._extract_batch(llm, system_prompt, source, batch, batch_num, question, sem))
 
-            raw_text = result.content
-            kos, evs = self._parse_output(raw_text)
+        results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-            logger.info("[Extractor] 文档 '%s' 提取 %d 个知识对象, %d 条证据",
-                        source, len(kos), len(evs))
+        all_kos, all_evs = [], []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            kos, evs = r
+            all_kos.extend(kos)
+            all_evs.extend(evs)
+
+        logger.info("[Extractor] 文档 '%s' 共提取 %d 个知识对象, %d 条证据（%d 批并行）",
+                    source, len(all_kos), len(all_evs),
+                    (len(chunks) + batch_size - 1) // batch_size)
+        return all_kos, all_evs
+
+    async def _extract_batch(self, llm, system_prompt: str, source: str, batch: list,
+                             batch_num: int, question: str, sem: asyncio.Semaphore) -> tuple[list[KnowledgeObject], list[Evidence]]:
+        """并行提取单个批次"""
+        async with sem:
+            doc_text = self._format_single_doc(source, batch)
+            user_prompt = f"用户问题：{question}\n\n文档内容（{source}，第{batch_num}部分）：\n{doc_text}"
+            try:
+                result = await llm.ainvoke([
+                    ("system", system_prompt),
+                    ("human", user_prompt),
+                ])
+                kos, evs = self._parse_output(result.content)
+            except Exception as e:
+                logger.error("[Extractor] 文档 '%s' 第%d部分提取失败: %s", source, batch_num, e)
+                raise
+
+            # 强制覆盖 source 为当前文档名（LLM 可能填错或幻觉为其他文档）
+            for ko in kos:
+                ko.source = source
+            for ev in evs:
+                ev.source = source
             return kos, evs
-
-        except Exception as e:
-            logger.error("[Extractor] 文档 '%s' 提取失败: %s", source, e)
-            return [], []
 
     @staticmethod
     def _format_single_doc(source: str, chunks: list) -> str:

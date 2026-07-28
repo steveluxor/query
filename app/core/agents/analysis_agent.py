@@ -26,6 +26,10 @@ class AnalysisAgent(BaseAgent):
             "analysis": AnalysisResult,
         },
         tools=["calculate_sum", "calculate_rank"],
+        tool_descriptions={
+            "calculate_sum": "数值求和",
+            "calculate_rank": "数值排名",
+        },
         merge_policy={
             "analysis": "replace",
         },
@@ -35,7 +39,7 @@ class AnalysisAgent(BaseAgent):
         self.engine = rag_engine
 
     async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "", **kwargs) -> AgentContext:
-        tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["calculate_sum", "calculate_rank"])
+        tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["read_all_rows", "calculate_sum", "calculate_rank"])
 
         system_prompt = PromptManager.get("analysis", "system")
 

@@ -56,7 +56,7 @@ class ExcelLoader:
             for row in rows_iter:
                 excel_row_num += 1  # 每行递增
                 if headers is None:
-                    headers = [str(h) if h is None or str(h).strip() == "" else str(h) for i, h in enumerate(row)]
+                    headers = ["" if h is None or str(h).strip() == "" else str(h) for i, h in enumerate(row)]
                     # 确保所有列名唯一
                     seen = {}
                     unique_headers = []

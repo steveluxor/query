@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -12,6 +12,7 @@ class AgentCapability:
     required_inputs: 必须通过 port_bindings 连接的端口名集合（不在其中的视为可选）
     outputs:         该 Agent 执行后会写入 context.outputs 的数据 key → 类型映射
     merge_policy: retry 时各 output 的合并策略 (replace / dedup / append)
+    dedup_key_func:  output_key → dedup key 提取函数 (item) -> hashable
     control_actions:  Runtime 可执行的 control action（如 retry）
     control_outputs:  Runtime 控制信号 key，不可被 Executor 消费
     terminal:         为 True 时该 Controller 可终止整个 Workflow
@@ -22,7 +23,9 @@ class AgentCapability:
     required_inputs: set[str] = field(default_factory=set)
     outputs: dict[str, Any] = field(default_factory=dict)
     tools: list[str] = field(default_factory=list)
+    tool_descriptions: dict[str, str] = field(default_factory=dict)
     merge_policy: dict[str, str] = field(default_factory=dict)
+    dedup_key_func: dict[str, Callable] = field(default_factory=dict)
 
     control_actions: list[str] = field(default_factory=list)
     control_outputs: list[str] = field(default_factory=list)
@@ -33,6 +36,7 @@ class AgentCapability:
     def output_keys(self) -> list[str]:
         """所有 outputs 的 key 列表（用于生命周期管理）"""
         return list(self.outputs.keys())
+
 
     @property
     def merged_keys(self) -> list[str]:

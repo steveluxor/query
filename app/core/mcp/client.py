@@ -51,19 +51,23 @@ class MCPClient:
 
     # 不自动注入 session_id 和 task_id 的工具（内部 tool）
     _NO_SESSION_TOOLS = {"_create_session", "_cleanup_session"}
+    # consumer 工具不注入 task_id，始终读共享的 search_ctx
+    # producer（search_documents）仍需 task_id 实现写隔离
+    _CONSUMER_TOOLS = {"calculate_sum", "calculate_rank", "read_all_rows"}
 
     async def call_tool(self, tool_name: str, arguments: dict, session_id: str = "") -> str:
-        """调用工具，自动注入 session_id + task_id（内部 tool 除外）"""
+        """调用工具，自动注入 session_id + task_id（内部 tool 和 consumer tool 除外）"""
         if not self.session:
             raise RuntimeError("MCP Client 未连接")
 
         if session_id and tool_name not in self._NO_SESSION_TOOLS:
             arguments = {"session_id": session_id, **arguments}
-            # 自动注入当前 task_id（Agent 不感知，asyncio.gather 并发时由 contextvars 隔离）
-            from app.core.agent_context import _task_id_var
-            task_id = _task_id_var.get()
-            if task_id:
-                arguments = {"task_id": task_id, **arguments}
+            # 只有 producer 工具才注入 task_id（task 隔离写），consumer 工具统一读 search_ctx
+            if tool_name not in self._CONSUMER_TOOLS:
+                from app.core.agent_context import _task_id_var
+                task_id = _task_id_var.get()
+                if task_id:
+                    arguments = {"task_id": task_id, **arguments}
 
         logger.info("[MCP Client] 调用工具: %s(%s)", tool_name, arguments)
         result = await self.session.call_tool(tool_name, arguments)

@@ -81,7 +81,8 @@ class RAGEngine:
         """搜索工具：search_documents, list_documents"""
 
         @tool
-        def search_documents(query: str, row_start: int | None = None, row_end: int | None = None) -> str:
+        def search_documents(query: str, row_start: int | None = None, row_end: int | None = None,
+                             strategy: str = "standard") -> str:
             """从知识库中搜索与问题相关的文档内容。需要查找具体信息、数据、记录时调用。搜索词应具体，包含数据中可能的列名。
             如果要查询特定行号范围（如"第90到100行"、"第91行之后"），请传入 row_start 和 row_end 参数。"""
             ctx.tools_called.append("search_documents")
@@ -92,7 +93,7 @@ class RAGEngine:
                     "你已经搜索两次了。请基于已获得的数据，"
                     "直接回答或调用 calculate_sum/calculate_rank 进行精确计算。"
                 )
-            return self._execute_search(query, row_start, row_end, ctx)
+            return self._execute_search(query, row_start, row_end, ctx, strategy=strategy)
 
         @tool
         def list_documents() -> str:
@@ -501,7 +502,7 @@ class RAGEngine:
                     did = doc.metadata.get("document_id")
                     # 如果是新文档，补入（用较低的 score 确保排在前面）
                     if did not in selected_doc_ids:
-                        filtered.append((doc, 0.3))  # 关键词匹配给予较好分数
+                        filtered.append((doc, 1.0))  # 排在 embedding 结果之后，strict 策略不会误选
                         selected_doc_ids.add(did)
                         logger.info("关键词搜索补入: %s (doc_id=%s)", doc.metadata.get("file_name", ""), did)
 
@@ -746,8 +747,6 @@ class RAGEngine:
         if not chunks:
             logger.info("read_all_rows 被调用但未找到完整数据")
             return "未找到完整数据。"
-
-        logger.info("read_all_rows 被调用，返回 %d 个 chunk", len(chunks))
 
         rows = []
         for doc, _ in chunks:

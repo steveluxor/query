@@ -1,4 +1,5 @@
 import logging
+import types
 import typing
 
 from app.models.task_graph import TaskGraph
@@ -158,14 +159,25 @@ class DAGDataFlowValidator:
         """检查 declared_type 是否满足 expected_type
 
         - 精确匹配：DocumentBundle == DocumentBundle
-        - 泛型 origin 匹配：list[KnowledgeObject] → origin=list 满足 list
+        - Union/Optional：expected_type 为 X | None 时，declared_type 是 X 则匹配
+        - 参数化泛型：list[KnowledgeObject] == list[KnowledgeObject]（比较 origin + args）
         - 不匹配则返回 False
         """
         if declared_type is expected_type:
             return True
-        origin = typing.get_origin(declared_type)
-        if origin is not None and origin is expected_type:
-            return True
+        # Union/Optional: expected_type = X | None, declared_type = X → 匹配
+        union_origin = typing.get_origin(expected_type)
+        if union_origin is types.UnionType:
+            return any(declared_type is arg for arg in typing.get_args(expected_type))
+        # 参数化泛型: list[KnowledgeObject] == list[KnowledgeObject]
+        declared_origin = typing.get_origin(declared_type)
+        expected_origin = typing.get_origin(expected_type)
+        if declared_origin is not None and expected_origin is not None:
+            return (declared_origin is expected_origin
+                    and typing.get_args(declared_type) == typing.get_args(expected_type))
+        # 参数化泛型 → bare 类型: list[dict] 满足 list
+        if declared_origin is not None and expected_origin is None:
+            return declared_origin is expected_type
         return False
 
     def validate_port_bindings(self, plan: TaskGraph, registry) -> list[str]:

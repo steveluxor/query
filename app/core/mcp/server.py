@@ -47,11 +47,12 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
     ctx = SearchContext(document_ids=session.document_ids)
     raw_result = rag_engine._execute_search(query, row_start, row_end, ctx, strategy=strategy)
 
-    # 缓存状态到 per-session（按 task_id 隔离，并发 task 互不影响）
+    # 缓存状态到 per-session
+    # 同时保存到 search_ctx（共享）和 search_contexts[task_id]（task 隔离）
+    # 这样下游 task（如 analysis/calculate_sum）在 task_id 不同时也能回退到 search_ctx
+    session.search_ctx = ctx
     if task_id:
         session.search_contexts[task_id] = ctx
-    else:
-        session.search_ctx = ctx
 
     # 解析结果，提取数据完整性信息
     rows_returned = len(ctx.last_search_chunks) if ctx.last_search_chunks else 0
@@ -95,7 +96,7 @@ async def calculate_sum(session_id: str, key_name: str, row_filter: str = "", co
                 session_id[:8], task_id or "-", key_name, row_filter, content_filter)
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_contexts.get(task_id) if task_id else session.search_ctx
+    ctx = session.search_ctx
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 
@@ -110,7 +111,7 @@ async def calculate_rank(session_id: str, key_name: str, ascending: bool, positi
                 session_id[:8], task_id or "-", key_name, ascending, position)
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_contexts.get(task_id) if task_id else session.search_ctx
+    ctx = session.search_ctx
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 
@@ -123,7 +124,7 @@ async def read_all_rows(session_id: str, task_id: str = "") -> str:
     logger.info("[MCP] read_all_rows (session=%s, task=%s)", session_id[:8], task_id or "-")
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_contexts.get(task_id) if task_id else session.search_ctx
+    ctx = session.search_ctx
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 

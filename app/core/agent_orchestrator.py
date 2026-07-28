@@ -66,16 +66,16 @@ class AgentOrchestrator:
 
             # 5. Planner 生成 TaskGraph（与偏好检测并行执行）
             try:
-                plan = self._plan(context.question, context.memory_context)
+                plan = self._plan(context.question, context.memory_context, context.history)
                 if not plan or not plan.tasks:
                     plan = self._fallback_plan(context.question)
             except (PlannerError, WorkflowValidationError) as e:
                 logger.warning("[Orchestrator] Planner 异常: %s，使用 fallback 计划", e)
                 plan = self._fallback_plan(context.question)
 
-            # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
-            if plan and plan.tasks:
-                plan = self._post_process_plan(plan, context.question, context.memory_context)
+            # # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正（临时注释以测试影响）
+            # if plan and plan.tasks:
+            #     plan = self._post_process_plan(plan, context.question, context.memory_context)
 
             if plan and plan.tasks:
                 context.plan = plan
@@ -104,11 +104,17 @@ class AgentOrchestrator:
         original_question = context.question
         max_iterations = 10  # 防止 Controller 死循环
 
-        # 从 registry 收集所有 merge_policy，设置到 context
+        # 从 registry 收集所有 merge_policy 和 dedup_key_func，设置到 context
         context.merge_policies = {}
+        context.dedup_key_funcs = {}
         for cap in self.registry.all_capabilities():
             for key, policy in cap.merge_policy.items():
                 context.merge_policies[key] = policy
+            for key, func in cap.dedup_key_func.items():
+                context.dedup_key_funcs[key] = func
+
+        # 自动补齐缺失的 port_bindings（基于 capability inputs/outputs 类型匹配）
+        self._auto_wire_port_bindings(plan)
 
         for _ in range(max_iterations):
             completed_ids = {t.id for t in plan.tasks if t.status == TaskStatus.COMPLETED}
@@ -144,6 +150,62 @@ class AgentOrchestrator:
                 from app.exceptions import WorkflowExecutionError
                 raise WorkflowExecutionError(f"DAG 未产生目标输出: {missing}")
 
+    def _auto_wire_port_bindings(self, plan: TaskGraph):
+        """自动补齐缺失的 port_bindings：通过 capability inputs/outputs 类型匹配推断
+
+        不依赖硬编码的 agent/port 映射，而是根据每个 Agent 声明的输入类型，
+        在上游 task 中查找输出类型兼容的 output，自动建立绑定。
+        """
+        import types as py_types
+        import typing
+
+        task_map = {t.id: t for t in plan.tasks}
+
+        def type_matches(source_type: type, target_type: type) -> bool:
+            """检查 source_type 是否满足 target_type（复用 DAGDataFlowValidator._type_matches 逻辑）"""
+            if source_type is target_type:
+                return True
+            # Union/Optional: target = X | None, source = X → 匹配
+            union_origin = typing.get_origin(target_type)
+            if union_origin is py_types.UnionType:
+                return any(source_type is arg for arg in typing.get_args(target_type))
+            # 参数化泛型: list[KO] == list[KO]
+            src_origin = typing.get_origin(source_type)
+            tgt_origin = typing.get_origin(target_type)
+            if src_origin is not None and tgt_origin is not None:
+                return (src_origin is tgt_origin
+                        and typing.get_args(source_type) == typing.get_args(target_type))
+            # 参数化泛型 → bare 类型: list[dict] 满足 list
+            if src_origin is not None and tgt_origin is None:
+                return src_origin is target_type
+            return False
+
+        for task in plan.tasks:
+            task_cap = self.registry.get(task.agent)
+            if not task_cap or not task_cap.inputs:
+                continue
+            for port_name, port_type in task_cap.inputs.items():
+                if port_name in task.port_bindings:
+                    continue
+                # 扫描上游 task 的输出，找类型兼容的第一个
+                for dep_id in task.depends_on:
+                    dep = task_map.get(dep_id)
+                    if not dep:
+                        continue
+                    dep_cap = self.registry.get(dep.agent)
+                    if not dep_cap or not dep_cap.outputs:
+                        continue
+                    for out_name, out_type in dep_cap.outputs.items():
+                        if type_matches(out_type, port_type):
+                            task.port_bindings[port_name] = f"{dep_id}.{out_name}"
+                            logger.info("[Orchestrator] 自动绑定 %s.%s ← %s.%s (%s → %s)",
+                                        task.id, port_name, dep_id, out_name,
+                                        out_type.__name__ if hasattr(out_type, '__name__') else str(out_type),
+                                        port_type.__name__ if hasattr(port_type, '__name__') else str(port_type))
+                            break
+                    if port_name in task.port_bindings:
+                        break
+
     async def _run_plan_task(self, context: AgentContext, task: TaskNode, original_question: str):
         """按 capability 驱动统一执行 — 不区分 role，AgentResult 承载 outputs 和 actions"""
         cap = self.registry.get(task.agent)
@@ -178,6 +240,7 @@ class AgentOrchestrator:
             result = await agent.execute(
                 context, task_id=task.id,
                 mcp_client=self.mcp_client, mcp_session_id=context.mcp_session_id,
+                original_question=original_question,
                 **upstream_kwargs,
             )
 
@@ -191,6 +254,9 @@ class AgentOrchestrator:
                 await self.action_registry.handle(action, context, self)
 
             task.status = TaskStatus.COMPLETED
+            # 收集 Agent 声明的工具名作为执行事实（供 memory 存储）
+            if cap.tools:
+                context.tools_called.extend(cap.tools)
         except Exception as e:
             logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
             task.status = TaskStatus.FAILED
@@ -208,7 +274,8 @@ class AgentOrchestrator:
             raise ValueError("无法解析 JSON")
         return result
 
-    def _plan(self, question: str, memory_context: str | None = None) -> TaskGraph | None:
+    def _plan(self, question: str, memory_context: str | None = None,
+              history: list[dict] | None = None) -> TaskGraph | None:
         prompt = PromptManager.get("planner", "system")
         prompt = prompt.replace("{available_executors}", self.registry.format_executors_for_prompt())
         prompt = prompt.replace("{available_controllers}", self.registry.format_controllers_for_prompt())
@@ -218,6 +285,26 @@ class AgentOrchestrator:
             prompt += f"\n\n可用文档：\n{doc_list}"
         if memory_context:
             prompt += f"\n\n长期记忆：{memory_context}"
+            logger.info("[Orchestrator] memory_context (前300字): %s", memory_context[:300])
+        # 上一轮对话历史，帮助 Planner 理解追问上下文
+        if history and len(history) > 0:
+            last = history[-1]
+            if hasattr(last, 'question'):
+                last_q, last_a = last.question, last.answer
+            else:
+                last_q, last_a = last.get('question', ''), last.get('answer', '')
+            prompt += "\n\n上一轮对话：\n"
+            prompt += f"用户: {str(last_q)[:100]}\n"
+            prompt += f"助手: {str(last_a)[:200]}"
+        # 短追问 + memory 中有数值计算工具名 + 问题本身是延续性追问 → 补全上下文
+        if len(question.strip()) < 10 and memory_context and (
+            "数值求和" in memory_context or "数值排名" in memory_context
+        ):
+            continuation_kw = ("结果", "继续", "然后", "接着", "答案", "汇总", "总结",
+                               "result", "continue", "next", "then")
+            if any(kw in question.strip().lower() for kw in continuation_kw):
+                logger.info("[Orchestrator] 检测到短追问+数值计算上下文，补全问题: '%s'", question)
+                question = f"{question}（这是对上一轮数值计算的简短追问。注意：需要完整的 retrieval→extractor→analysis→generator 链路，analysis 做精确数值计算，extractor 提取结构化知识，generator 汇总后给出最终结果）"
         prompt += f"\n\n用户问题：{question}"
 
         try:
@@ -272,15 +359,9 @@ class AgentOrchestrator:
             tasks=[
                 TaskNode(id="task1", agent="retrieval", objective=question),
                 TaskNode(id="task2", agent="extractor", objective=question,
-                         depends_on=["task1"],
-                         port_bindings={"knowledge_document": "task1.document_bundle"}),
+                         depends_on=["task1"]),
                 TaskNode(id="task3", agent="generator", objective=question,
-                         depends_on=["task2"],
-                         port_bindings={
-                             "structured_knowledge": "task2.knowledge_objects",
-                             "evidence_list": "task2.evidence",
-                             "source_meta": "task2.sources",
-                         }),
+                         depends_on=["task2"]),
             ],
         )
 
@@ -288,8 +369,10 @@ class AgentOrchestrator:
         """Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
 
         1. 数值问题（求和/排名）必须包含 analysis agent
-        2. 短追问且 memory_context 有上下文 → chat 改为正常流程
+        2. 文档/数据查询类不应使用 chat
+        3. 自动补齐缺失的 port_bindings（LLM 经常遗漏）
         """
+        print("_post_process_plan CALLED", flush=True)
         lower_q = question.strip().lower()
         has_analysis = any(t.agent == "analysis" for t in plan.tasks)
         has_chat = any(t.agent == "chat" for t in plan.tasks)
@@ -325,20 +408,8 @@ class AgentOrchestrator:
                 if generator_task:
                     if analysis_task.id not in generator_task.depends_on:
                         generator_task.depends_on.append(analysis_task.id)
-                    if "analysis_result" not in generator_task.port_bindings:
-                        generator_task.port_bindings["analysis_result"] = f"{analysis_task.id}.analysis"
 
-        # === 规则 2：短追问继承上下文（防止返回问候） ===
-        if has_chat and memory_context:
-            greeting_keywords = ("你好", "hello", "hi", "嗨", "喂", "您好")
-            is_pure_greeting = any(kw in lower_q for kw in greeting_keywords)
-            if not is_pure_greeting and len(question) < 10:
-                logger.info("[Orchestrator] 短追问但非纯问候，移除 chat agent")
-                plan.tasks = [t for t in plan.tasks if t.agent != "chat"]
-                if not plan.tasks:
-                    return self._fallback_plan(question)
-
-        # === 规则 3：文档/数据查询类不应使用 chat ===
+        # === 规则 2：文档/数据查询类不应使用 chat ===
         if has_chat:
             doc_keywords = ("有哪些文档", "列出文档", "什么文档", "所有文档", "文档列表",
                             "有什么数据", "有哪些数据", "查一下", "搜索")
@@ -347,6 +418,27 @@ class AgentOrchestrator:
                 plan.tasks = [t for t in plan.tasks if t.agent != "chat"]
                 if not plan.tasks:
                     return self._fallback_plan(question)
+
+        # === 规则 3：纯数值计算问题（求和/排名），移除不必要的 extractor ===
+        # Extractor 耗时 90-160s，纯数值问题只需 analysis 结果即可回答
+        logger.info("[Orchestrator] _post_process_plan: needs_sum=%s needs_rank=%s agents=%s",
+                     needs_sum, needs_rank, [t.agent for t in plan.tasks])
+        if (needs_sum or needs_rank):
+            extractor_ids = {t.id for t in plan.tasks if t.agent == "extractor"}
+            logger.info("[Orchestrator] _post_process_plan: extractor_ids=%s", extractor_ids)
+            if extractor_ids:
+                logger.info("[Orchestrator] 纯数值计算问题，移除 extractor task(s): %s", extractor_ids)
+                plan.tasks = [t for t in plan.tasks if t.agent != "extractor"]
+                if not plan.tasks:
+                    return self._fallback_plan(question)
+                # 清理所有引用了已移除 task ID 的 port_bindings
+                for t in plan.tasks:
+                    if t.agent == "generator":
+                        t.depends_on = [d for d in t.depends_on if d not in extractor_ids]
+                    stale = [k for k, v in t.port_bindings.items()
+                             if "." in v and v.split(".")[0] in extractor_ids]
+                    for k in stale:
+                        t.port_bindings.pop(k, None)
 
         return plan
 
@@ -388,6 +480,13 @@ class AgentOrchestrator:
         context.memory_context = self.agent_memory.format_context(context.session_id)
 
     def _update_memory(self, context: AgentContext):
+        # 从 registry 收集工具名 → 描述映射（各 Agent 在 capability 中声明）
+        tool_desc_map = {}
+        for cap in self.registry.all_capabilities():
+            tool_desc_map.update(getattr(cap, 'tool_descriptions', {}))
+
+        mapped_tools = [tool_desc_map.get(t, t) for t in context.tools_called]
+
         source_docs = context.get_output("sources") or []
         doc_names = list(dict.fromkeys(
             s.get("file_name", "") for s in source_docs if s.get("file_name")
@@ -397,8 +496,7 @@ class AgentOrchestrator:
             {
                 "question": context.question,
                 "answer": context.get_output("answer") or "",
-                "is_agg": context.is_agg,
-                "tools_called": context.tools_called,
+                "tools_called": mapped_tools,
                 "document_ids": context.document_ids,
                 "document_names": doc_names,
             },

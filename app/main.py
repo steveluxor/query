@@ -31,7 +31,7 @@ async def lifespan(application: FastAPI):
     application.state.agent_memory = AgentMemory()
     application.state.redis_store = RedisStore()
 
-    # 初始化 MCP Client（使用 sys.executable 确保子进程使用同一 Python 环境）
+    # 初始化 MCP Client
     mcp_client = MCPClient(
         server_command=sys.executable,
         server_args=["-m", "app.core.mcp.server"]

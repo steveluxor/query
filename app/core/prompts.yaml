@@ -84,6 +84,7 @@ extractor:
     - 属性值可以是字符串、列表或数字
     - 属性值应使用完整的句子描述，确保信息完整可读，不要只写关键词
     - 每个文档至少提取 3-5 个关键属性，覆盖主题、方法、结果/结论等维度
+    - **对于表格/行数据（如 Excel 格式的账单、清单、销售记录），每行提取为一个独立的知识对象**，attributes 包含该行的所有列值（如行号、品牌、产品名、原价、优惠等），不要做汇总
     - 如果文档内容较长，务必覆盖开头、中间、结尾的关键信息，不要遗漏后半部分
     - 只输出 JSON，不要任何自然语言
     - JSON 字符串值中的双引号必须使用 \" 转义
@@ -115,10 +116,12 @@ analysis:
     你是一个数据分析专家。基于已检索到的数据，执行精确计算。
 
     工具：
-    - calculate_sum: 对指定列求和
-    - calculate_rank: 对指定列排序并返回第N名
+    - read_all_rows: 读取当前搜索到的文档的全部数据行。先调用此工具查看数据中的列名，再选择合适的列进行计算
+    - calculate_sum: 对指定列求和。调用前先用 read_all_rows 查看可用列名
+    - calculate_rank: 对指定列排序并返回第N名。调用前先用 read_all_rows 查看可用列名
 
     规则：
+    - **先调用 read_all_rows 查看数据中的列名，再选择合适的列进行计算**。不要猜测列名
     - 必须通过工具获取计算结果，不要自行编造数值
     - 计算工具最多调用8次
     - 如果数据不足，直接说明
@@ -131,14 +134,14 @@ analysis:
       "calculations": [
         {
           "operation": "sum",
-          "field": "price",
+          "field": "列名（如金额、得分、数量）",
           "arguments": {},
-          "result": 5000,
-          "source": "sales.xlsx"
+          "result": 数值结果,
+          "source": "来源文件名"
         }
       ],
-      "findings": ["发现1"],
-      "conclusions": ["结论1"]
+      "findings": ["数据分析中发现的关键信息"],
+      "conclusions": ["基于计算得出的结论"]
     }
 
 # ===== Answer Generator =====
@@ -149,11 +152,10 @@ generator:
     规则：
     - 回答必须基于提供的知识对象或证据（如有分析结果也可参考）
     - 如果 analysis 分析结果为空，可以仅基于知识对象或证据组织回答
-    - knowledge_objects 是结构化知识（含 topic + attributes），优先使用
-    - evidence 是扁平事实列表，仅在 knowledge_objects 不足时作为补充
+    - **纯数值计算场景（求和/排名）：如果 analysis 分析结果非空但 knowledge_objects 为空，可直接基于 analysis 的计算结果、发现和结论组织数值答案**，无需等待 extractor
+    - knowledge_objects 是结构化知识，提供核心信息；evidence 是补充细节，两者共同构成完整回答
     - 不要编造数据或引用不存在的来源
     - 如果知识不足，说明"在已检索到的内容中未找到"
-    - 保持回答简洁、切题
 
 # ===== Critic Agent =====
 critic:
@@ -222,8 +224,16 @@ planner:
     - 每个 DAG 至少有一个 task 能产出 goal_outputs 中声明的所有 key（如 generator 的 outputs 包含 "answer"）
     - analysis agent 只能做数值计算（求和、排名），不能用于文本对比或综合分析
     - **analysis 必须 depends_on retrieval**：analysis 的 calculate_sum/calculate_rank 工具依赖先执行 search_documents 填充数据，不能与 retrieval 并行
+    - **当 DAG 包含 analysis 且需要 extractor 的文本素材时，必须同时包含 extractor**。analysis 和 extractor 都依赖 retrieval 且无相互依赖，可以并行执行
+    - **纯数值计算（求和/排名）DAG 可以不包含 extractor**。当用户只问总金额/最贵等纯数值问题时，generator 仅需 analysis 结果即可回答数值问题，无需 extractor 提取结构化知识。但"查询信息/是什么/有哪些/总结/对比"等需要文本素材的问题仍需 extractor
     - **数值计算问题必须使用 analysis agent**：涉及"总共/合计/花了多少钱/总金额/求和"等加总问题必须包含 analysis（calculate_sum），涉及"最贵/最便宜/排名/排序/第几"等排名问题必须包含 analysis（calculate_rank）。Generator 是纯文本 LLM 无法精确计算，不能依赖 extractor 或 generator 估算数值
     - 文本对比/汇总/综合类任务应由 generator agent 完成
+
+    - 问题模式 → Agent 映射（必须遵守）：
+      - 求和/合计/总共/花了多少钱/总金额 → DAG 必须包含 analysis agent（calculate_sum）
+      - 最贵/最便宜/第N/排名/排序 → DAG 必须包含 analysis agent（calculate_rank）
+      - 查询信息/是什么/有哪些/总结/对比 → 使用 retrieval + extractor + generator
+      - 简单问候/打招呼/闲聊 → 只使用 chat agent
 
     顺序 DAG 示例（对比/综合类任务——确保数据完整性）：
     {
@@ -274,6 +284,8 @@ planner:
     - key=Agent 输入端口名（声明在 Agent 的 inputs 中）
     - value="source_task_id.output_key"（来源 task 的 ID + 该 task 的 output key）
     - 所有 task 间的数据传递必须通过 port_bindings 显式声明，不存在自动注入
+    - 注意：上例中的端口名（knowledge_document、structured_knowledge 等）仅为示范，
+      实际请使用各 Agent capability 声明中定义的输入/输出端口名
 
 replanner:
   system: |

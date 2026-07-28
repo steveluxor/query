@@ -53,6 +53,7 @@ class AgentContext:
     # ==================== 运行时上下文（每轮执行前设置） ====================
     current_task_id: str = ""
     merge_policies: dict[str, str] = field(default_factory=dict)
+    dedup_key_funcs: dict[str, callable] = field(default_factory=dict)
 
     # ==================== 兼容字段（过渡期保留） ====================
     tools_called: list[str] = field(default_factory=list)
@@ -122,10 +123,11 @@ class AgentContext:
                     merged.extend(v)
 
             if policy == "dedup":
+                dedup_func = self.dedup_key_funcs.get(key) if hasattr(self, 'dedup_key_funcs') else None
                 seen = set()
                 result = []
                 for item in merged:
-                    dk = AgentContext._dedup_key(item, key)
+                    dk = dedup_func(item) if dedup_func else (repr(item)[:200],)
                     if dk not in seen:
                         seen.add(dk)
                         result.append(item)
@@ -133,15 +135,6 @@ class AgentContext:
             return merged
 
         return values[-1]
-
-    @staticmethod
-    def _dedup_key(item, output_key: str) -> tuple:
-        if output_key == "evidence":
-            return (getattr(item, 'source', ''), getattr(item, 'statement', '')[:200])
-        elif output_key == "sources":
-            return ((item.get("file_name", "") if isinstance(item, dict) else ""), str(item)[:200])
-        else:
-            return (repr(item)[:200],)
 
     def get_output_entry(self, key: str, task_id: str = "") -> AgentOutput | None:
         """获取完整 AgentOutput（含 producer/version/timestamp 元数据）"""

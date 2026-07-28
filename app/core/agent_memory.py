@@ -8,28 +8,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 事实提取关键词映射
-_FACT_RULES: list[tuple[list[str], str]] = [
-    # 聚合操作 - 补充英文和口语化表达
-    (["求", "合计", "总和", "加起", "总共", "sum", "汇总", "统计", "加起来", "一共"],
-     "用户执行了数值求和操作"),
-    # 排序操作
-    (["排序", "排名", "最贵", "最便宜", "最高", "最低", "第", "sort", "order", "从高到低", "从低到高", "前几名"],
-     "用户执行了排序/排名操作"),
-    # 筛选操作
-    (["过滤", "筛选", "条件", "filter", "where", "满足", "符合"],
-     "用户使用了条件过滤"),
-    # 查询范围
-    (["全部", "所有", "完整", "列出", "列举", "全部的", "所有的", "list", "all"],
-     "用户查询了完整数据"),
-    # 对比分析
-    (["对比", "比较", "差异", "区别", "compare", "vs", "对比一下"],
-     "用户执行了对比分析"),
-    # 趋势分析
-    (["趋势", "变化", "增长", "下降", "trend", "变化趋势", "走势"],
-     "用户查询了趋势变化"),
-]
-
 
 
 @dataclass
@@ -228,13 +206,12 @@ class AgentMemory:
 
         question = turn.get("question", "")
         answer = turn.get("answer", "")
-        was_agg = turn.get("is_agg", False)
 
         # 1. 里程碑摘要
         self._compress_summary(memory, question, answer)
 
-        # 3. 提取关键事实（去重）
-        new_facts = self._extract_facts(question, was_agg)
+        # 3. 从 tools_called 提取关键事实（所有工具名都写入，不区分搜索/计算）
+        new_facts = turn.get("tools_called", [])
         existing_texts = {f.text for f in memory.facts}
         for fact_text in new_facts:
             if fact_text not in existing_texts:
@@ -313,7 +290,6 @@ class AgentMemory:
         memory.turn_count += 1
         question = turn.get("question", "")
         answer = turn.get("answer", "")
-        was_agg = turn.get("is_agg", False)
 
         # 批量重建：仅创建首个里程碑，不扩展范围（留给后续 update 按事实累积触发重写）
         q_short = question[:30]
@@ -324,8 +300,9 @@ class AgentMemory:
             ))
             memory._dirty = True
 
-        # 事实去重
-        new_facts = self._extract_facts(question, was_agg)
+        # 事实去重（从 tools_called 提取，rebuild 路径无 tools_called 则跳过）
+        raw_tools = turn.get("tools_called", [])
+        new_facts = raw_tools[:]
         existing_texts = {f.text for f in memory.facts}
         for fact_text in new_facts:
             if fact_text not in existing_texts:
@@ -534,18 +511,6 @@ class AgentMemory:
         except Exception as e:
             logger.warning("AgentMemory 事实压缩失败: %s", e)
 
-    def _extract_facts(self, question: str, was_agg: bool) -> list[str]:
-        """基于关键词提取事实"""
-        facts = []
-        q_lower = question.lower()
-        for keywords, fact in _FACT_RULES:
-            if any(kw in q_lower or kw in question for kw in keywords):
-                if fact not in facts:
-                    facts.append(fact)
-        if was_agg:
-            facts.append("用户使用了数据聚合计算工具")
-        return facts
-
     def _check_preference_changes(self, memory: SessionMemory, question: str) -> None:
         """LLM 判断本轮是否有偏好变化（新增/修改/删除），每轮调用"""
         llm = self._summary_llm
@@ -572,21 +537,21 @@ class AgentMemory:
             new_prefs = extract_json(text)
             if not isinstance(new_prefs, dict):
                 return
-                with memory.lock:
-                    deleted_keys = [k for k, v in new_prefs.items()
-                                    if v is None and k in memory.preferences]
-                    added = {k: v for k, v in new_prefs.items()
-                             if v is not None and memory.preferences.get(k) != v}
-                    for k in deleted_keys:
-                        memory.preferences.pop(k)
-                    memory.preferences.update(added)
-                    if deleted_keys or added:
-                        memory._dirty = True
-                        memory._preferences_dirty = True
-                if deleted_keys:
-                    logger.info("LLM 偏好删除: %s", deleted_keys)
-                if added:
-                    logger.info("LLM 偏好提取: %s", added)
+            with memory.lock:
+                deleted_keys = [k for k, v in new_prefs.items()
+                                if v is None and k in memory.preferences]
+                added = {k: v for k, v in new_prefs.items()
+                         if v is not None and memory.preferences.get(k) != v}
+                for k in deleted_keys:
+                    memory.preferences.pop(k)
+                memory.preferences.update(added)
+                if deleted_keys or added:
+                    memory._dirty = True
+                    memory._preferences_dirty = True
+            if deleted_keys:
+                logger.info("LLM 偏好删除: %s", deleted_keys)
+            if added:
+                logger.info("LLM 偏好提取: %s", added)
         except Exception as e:
             logger.warning("LLM 偏好检测失败: %s", e)
 
