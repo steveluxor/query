@@ -32,6 +32,7 @@ class SessionMemory:
     milestones: list[Milestone] = field(default_factory=list)
     facts: list[Fact] = field(default_factory=list)
     preferences: dict = field(default_factory=dict)
+    recent_history: list = field(default_factory=list)  # 最近 5 轮 Q&A，FIFO
     turn_count: int = 0
     created_at: float = 0.0
     last_accessed: float = 0.0
@@ -124,6 +125,13 @@ class AgentMemory:
             memory._preferences_dirty = False  # 已是最新，无需写库
 
         memory.last_accessed = time.time()
+
+        # 填充 recent_history 缓存（最近 5 轮）
+        memory.recent_history = [
+            {"question": h.get("question", ""), "answer": h.get("answer", ""), "is_agg": h.get("is_agg", False)}
+            for h in history[-5:]
+        ]
+
         logger.info("rebuild_from_history: session=%s, turns=%d, prefs=%s",
                      session_id, len(history), bool(preferences))
 
@@ -242,6 +250,15 @@ class AgentMemory:
         if not memory.preferences:
             return  # 无偏好，跳过 LLM 调用
         self._check_preference_changes(memory, question)
+
+    def append_turn(self, session_id: str, question: str, answer: str, is_agg: bool = False) -> None:
+        """回答结束后追加本轮 Q&A 到 recent_history（FIFO，最多 5 条）"""
+        memory = self._sessions.get(session_id)
+        if not memory:
+            return
+        memory.recent_history.append({"question": question, "answer": answer, "is_agg": is_agg})
+        if len(memory.recent_history) > 5:
+            memory.recent_history = memory.recent_history[-5:]
 
     def format_context(self, session_id: str) -> str:
         """将记忆格式化为文本块，供 system prompt 注入

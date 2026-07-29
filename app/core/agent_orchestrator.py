@@ -73,9 +73,9 @@ class AgentOrchestrator:
                 logger.warning("[Orchestrator] Planner 异常: %s，使用 fallback 计划", e)
                 plan = self._fallback_plan(context.question)
 
-            # # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正（临时注释以测试影响）
-            # if plan and plan.tasks:
-            #     plan = self._post_process_plan(plan, context.question, context.memory_context)
+            # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
+            if plan and plan.tasks:
+                plan = self._post_process_plan(plan, context.question, context.memory_context)
 
             if plan and plan.tasks:
                 context.plan = plan
@@ -286,16 +286,17 @@ class AgentOrchestrator:
         if memory_context:
             prompt += f"\n\n长期记忆：{memory_context}"
             logger.info("[Orchestrator] memory_context (前300字): %s", memory_context[:300])
-        # 上一轮对话历史，帮助 Planner 理解追问上下文
+        # 最近对话历史，帮助 Planner 理解追问上下文
         if history and len(history) > 0:
-            last = history[-1]
-            if hasattr(last, 'question'):
-                last_q, last_a = last.question, last.answer
-            else:
-                last_q, last_a = last.get('question', ''), last.get('answer', '')
-            prompt += "\n\n上一轮对话：\n"
-            prompt += f"用户: {str(last_q)[:100]}\n"
-            prompt += f"助手: {str(last_a)[:200]}"
+            recent = history[-5:]
+            history_lines = []
+            for h in recent:
+                if hasattr(h, 'question'):
+                    hq, ha = h.question, h.answer
+                else:
+                    hq, ha = h.get('question', ''), h.get('answer', '')
+                history_lines.append(f"用户: {str(hq)[:100]}\n助手: {str(ha)[:200]}")
+            prompt += "\n\n最近对话历史：\n" + "\n---\n".join(history_lines)
         # 短追问 + memory 中有数值计算工具名 + 问题本身是延续性追问 → 补全上下文
         if len(question.strip()) < 10 and memory_context and (
             "数值求和" in memory_context or "数值排名" in memory_context
@@ -369,13 +370,10 @@ class AgentOrchestrator:
         """Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
 
         1. 数值问题（求和/排名）必须包含 analysis agent
-        2. 文档/数据查询类不应使用 chat
-        3. 自动补齐缺失的 port_bindings（LLM 经常遗漏）
+        2. 纯数值计算问题移除不必要的 extractor
         """
-        print("_post_process_plan CALLED", flush=True)
         lower_q = question.strip().lower()
         has_analysis = any(t.agent == "analysis" for t in plan.tasks)
-        has_chat = any(t.agent == "chat" for t in plan.tasks)
 
         # === 规则 1：数值问题强制包含 analysis ===
         sum_keywords = ("花了多少钱", "总共", "合计", "总金额", "总和", "求和", "sum", "total",
@@ -409,23 +407,10 @@ class AgentOrchestrator:
                     if analysis_task.id not in generator_task.depends_on:
                         generator_task.depends_on.append(analysis_task.id)
 
-        # === 规则 2：文档/数据查询类不应使用 chat ===
-        if has_chat:
-            doc_keywords = ("有哪些文档", "列出文档", "什么文档", "所有文档", "文档列表",
-                            "有什么数据", "有哪些数据", "查一下", "搜索")
-            if any(kw in lower_q for kw in doc_keywords):
-                logger.info("[Orchestrator] 文档查询类问题，移除 chat agent")
-                plan.tasks = [t for t in plan.tasks if t.agent != "chat"]
-                if not plan.tasks:
-                    return self._fallback_plan(question)
-
-        # === 规则 3：纯数值计算问题（求和/排名），移除不必要的 extractor ===
+        # === 规则 2：纯数值计算问题（求和/排名），移除不必要的 extractor ===
         # Extractor 耗时 90-160s，纯数值问题只需 analysis 结果即可回答
-        logger.info("[Orchestrator] _post_process_plan: needs_sum=%s needs_rank=%s agents=%s",
-                     needs_sum, needs_rank, [t.agent for t in plan.tasks])
         if (needs_sum or needs_rank):
             extractor_ids = {t.id for t in plan.tasks if t.agent == "extractor"}
-            logger.info("[Orchestrator] _post_process_plan: extractor_ids=%s", extractor_ids)
             if extractor_ids:
                 logger.info("[Orchestrator] 纯数值计算问题，移除 extractor task(s): %s", extractor_ids)
                 plan.tasks = [t for t in plan.tasks if t.agent != "extractor"]
@@ -462,15 +447,25 @@ class AgentOrchestrator:
         if not context.session_id:
             return
 
+        # 1. 恢复 memory 快照
         if not self.agent_memory.has_session(context.session_id):
             loaded = await self.redis_store.safe_get_memory(context.session_id)
             if loaded:
                 self.agent_memory.restore_session(context.session_id, loaded)
 
-        redis_history = await self.redis_store.safe_get_history(context.session_id)
-        if redis_history:
-            context.history = redis_history
+        memory = self.agent_memory._sessions.get(context.session_id)
 
+        # 2. recent_history 缓存满 → 直接用；不满 → 从 Redis 补齐
+        if memory and len(memory.recent_history) >= 5:
+            context.history = memory.recent_history
+        else:
+            redis_history = await self.redis_store.safe_get_history(context.session_id)
+            if redis_history:
+                context.history = redis_history
+                if memory:
+                    memory.recent_history = redis_history[-5:]
+
+        # 3. 无 memory 且有 history → rebuild（幂等）
         if context.session_id not in self.agent_memory._sessions and context.history:
             self.agent_memory.rebuild_from_history(
                 context.session_id, context.history,
@@ -500,4 +495,10 @@ class AgentOrchestrator:
                 "document_ids": context.document_ids,
                 "document_names": doc_names,
             },
+        )
+        # 追加到 recent_history 缓存
+        self.agent_memory.append_turn(
+            context.session_id,
+            context.question,
+            context.get_output("answer") or "",
         )

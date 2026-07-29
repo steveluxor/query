@@ -100,12 +100,15 @@ class RetrievalAgent(BaseAgent):
         """LLM 从用户问题生成搜索关键词和查询类型"""
         history_text = ""
         if history and len(history) > 0:
-            last = history[-1]
-            if hasattr(last, "question"):
-                q, a = last.question, getattr(last, "answer", "")
-            else:
-                q, a = last.get("question", ""), last.get("answer", "")
-            history_text = f"上一轮对话：\n用户: {str(q)[:200]}\n助手: {str(a)[:500]}\n\n"
+            recent = history[-5:]
+            lines = []
+            for h in recent:
+                if hasattr(h, "question"):
+                    hq, ha = h.question, getattr(h, "answer", "")
+                else:
+                    hq, ha = h.get("question", ""), h.get("answer", "")
+                lines.append(f"用户: {str(hq)[:200]}\n助手: {str(ha)[:500]}")
+            history_text = "最近对话历史：\n" + "\n---\n".join(lines) + "\n\n"
 
         llm = create_llm(temperature=0, max_tokens=200)
         try:
