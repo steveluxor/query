@@ -6,18 +6,20 @@ from fastapi import APIRouter, Depends, Request
 
 from app.config import settings
 from app.core.document_processor import DocumentProcessor
-from app.core.vector_store import VectorStore
+from app.core.mcp.client import MCPClient
 from app.models.schemas import IngestRequest, IngestResponse
 from app.exceptions import BizException, ErrorCode
 
 
-def get_vector_store(request: Request) -> VectorStore:
-    return request.app.state.vector_store
+def get_mcp_client(request: Request) -> MCPClient:
+    return request.app.state.mcp_client
 
 
 router = APIRouter(prefix="/ingest", tags=["Ingestion"])
 
 processor = DocumentProcessor()
+
+INGESTION_SESSION = "ingestion"
 
 _minio_client: minio.Minio | None = None
 
@@ -37,7 +39,7 @@ def _get_minio_client() -> minio.Minio:
 @router.post("/document", response_model=IngestResponse)
 async def ingest_document(
     request: IngestRequest,
-    vector_store: VectorStore = Depends(get_vector_store),
+    mcp_client: MCPClient = Depends(get_mcp_client),
 ):
     """接收文档，执行解析、切片、向量化并存入向量库"""
     file_path = request.file_path
@@ -71,10 +73,11 @@ async def ingest_document(
     texts = [c["text"] for c in chunks]
     metadatas = [c["metadata"] for c in chunks]
 
-    # 处理成功后清理旧向量，防止残留数据干扰
-    vector_store.delete_by_document_id(request.document_id)
-
-    vector_store.add_texts(texts, metadatas)
+    await mcp_client.call_tool("add_documents", {
+        "document_id": request.document_id,
+        "texts": texts,
+        "metadatas": metadatas,
+    }, session_id=INGESTION_SESSION)
 
     return IngestResponse(
         document_id=request.document_id,
@@ -85,8 +88,10 @@ async def ingest_document(
 @router.delete("/document/{document_id}")
 async def delete_document(
     document_id: int,
-    vector_store: VectorStore = Depends(get_vector_store),
+    mcp_client: MCPClient = Depends(get_mcp_client),
 ):
     """从向量库中删除指定文档的所有切片"""
-    vector_store.delete_by_document_id(document_id)
+    await mcp_client.call_tool("delete_document", {
+        "document_id": document_id,
+    }, session_id=INGESTION_SESSION)
     return {"status": "deleted", "document_id": document_id}

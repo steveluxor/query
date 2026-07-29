@@ -10,10 +10,9 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.api import ingestion, qa
-from app.core.rag_engine import RAGEngine
-from app.core.vector_store import VectorStore
+from app.core.infra.llm_factory import create_llm
 from app.core.agent_memory import AgentMemory
-from app.core.redis_store import RedisStore
+from app.core.infra.redis_store import RedisStore
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.mcp.client import MCPClient
 from app.exceptions import BizException, ErrorCode
@@ -25,9 +24,7 @@ setup_logging()
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # 全局初始化
-    vs = VectorStore()
-    application.state.vector_store = vs
-    application.state.rag_engine = RAGEngine(vs)
+    llm = create_llm()
     application.state.agent_memory = AgentMemory()
     application.state.redis_store = RedisStore()
 
@@ -40,7 +37,7 @@ async def lifespan(application: FastAPI):
     application.state.mcp_client = mcp_client
 
     application.state.orchestrator = AgentOrchestrator(
-        rag_engine=application.state.rag_engine,
+        llm=llm,
         agent_memory=application.state.agent_memory,
         redis_store=application.state.redis_store,
         mcp_client=mcp_client,
@@ -48,10 +45,8 @@ async def lifespan(application: FastAPI):
     yield
     # 资源清理
     await mcp_client.disconnect()
-    application.state.rag_engine = None
     application.state.agent_memory = None
     await application.state.redis_store.close()
-    vs.close()
 
 
 app = FastAPI(

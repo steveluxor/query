@@ -5,8 +5,8 @@ import re
 
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.core.llm_factory import create_llm
-from app.core.prompt_manager import PromptManager
+from app.core.infra.llm_factory import create_llm
+from app.core.prompts.prompt_manager import PromptManager
 from app.models.capability import AgentCapability
 from app.models.data_types import DocumentBundle, Evidence, KnowledgeObject
 
@@ -132,7 +132,7 @@ class ExtractionAgent(BaseAgent):
         llm = create_llm(temperature=0, max_tokens=8192, timeout=120)
 
         # 创建所有批次的任务（并行执行，用 semaphore 限制并发数防限流）
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(100)
         batch_tasks = []
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]

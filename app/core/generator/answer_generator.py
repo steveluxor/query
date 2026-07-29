@@ -4,7 +4,7 @@ import logging
 from app.config import settings
 from app.core.agent_context import AgentContext
 from app.core.agents.base_agent import BaseAgent
-from app.core.prompt_manager import PromptManager
+from app.core.prompts.prompt_manager import PromptManager
 from app.models.data_types import AgentTrace, AnalysisResult, Evidence, KnowledgeObject
 from app.models.capability import AgentCapability
 
@@ -34,7 +34,7 @@ class AnswerGenerator(BaseAgent):
     )
 
     def __init__(self):
-        from app.core.llm_factory import create_llm
+        from app.core.infra.llm_factory import create_llm
         self.llm = create_llm()
 
     async def run(self, context: AgentContext, **kwargs) -> AgentContext:

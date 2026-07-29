@@ -4,9 +4,9 @@ import logging
 from app.core.actions import ActionRegistry
 from app.core.agent_context import AgentContext, _task_id_var
 from app.core.agent_memory import AgentMemory
-from app.core.redis_store import RedisStore
+from app.core.infra.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
-from app.core.prompt_manager import PromptManager
+from app.core.prompts.prompt_manager import PromptManager
 from app.core.agent_registry import create_default_registry
 from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator, DAGDataFlowValidator
 from app.exceptions import PlannerError, WorkflowValidationError
@@ -23,8 +23,8 @@ class AgentOrchestrator:
     Agent 的输出由 AgentResult.outputs 传递，控制信号由 ActionRegistry 分发。
     """
 
-    def __init__(self, rag_engine, agent_memory: AgentMemory, redis_store: RedisStore, mcp_client: MCPClient):
-        self.rag_engine = rag_engine
+    def __init__(self, llm, agent_memory: AgentMemory, redis_store: RedisStore, mcp_client: MCPClient):
+        self.llm = llm
         self.agent_memory = agent_memory
         self.redis_store = redis_store
         self.mcp_client = mcp_client
@@ -34,7 +34,7 @@ class AgentOrchestrator:
         self.policy_validator = PolicyValidator()
         self.goal_validator = GoalValidator()
         self.dag_dataflow_validator = DAGDataFlowValidator()
-        self.registry = create_default_registry(rag_engine=rag_engine)
+        self.registry = create_default_registry(llm=llm)
 
         # Action Registry（ControlAction 分发，新增 action type 只需注册 Handler）
         self.action_registry = ActionRegistry().create_default()
@@ -66,7 +66,7 @@ class AgentOrchestrator:
 
             # 5. Planner 生成 TaskGraph（与偏好检测并行执行）
             try:
-                plan = self._plan(context.question, context.memory_context, context.history)
+                plan = await self._plan(context.question, context.memory_context, context.history)
                 if not plan or not plan.tasks:
                     plan = self._fallback_plan(context.question)
             except (PlannerError, WorkflowValidationError) as e:
@@ -274,12 +274,24 @@ class AgentOrchestrator:
             raise ValueError("无法解析 JSON")
         return result
 
-    def _plan(self, question: str, memory_context: str | None = None,
+    async def _plan(self, question: str, memory_context: str | None = None,
               history: list[dict] | None = None) -> TaskGraph | None:
         prompt = PromptManager.get("planner", "system")
         prompt = prompt.replace("{available_executors}", self.registry.format_executors_for_prompt())
         prompt = prompt.replace("{available_controllers}", self.registry.format_controllers_for_prompt())
-        doc_names = self.rag_engine.vector_store.get_document_names()
+        doc_names_raw = await self.mcp_client.call_tool("list_documents", {}, session_id="")
+        # 解析文档列表为 {id: name} 映射
+        doc_names = {}
+        if doc_names_raw and "共" in doc_names_raw:
+            for line in doc_names_raw.split("\n"):
+                if line.startswith("- ["):
+                    # 格式: "- [123] 文件名"
+                    try:
+                        did_str = line.split("[")[1].split("]")[0]
+                        name = line.split("] ", 1)[1]
+                        doc_names[int(did_str)] = name
+                    except (IndexError, ValueError):
+                        pass
         if doc_names:
             doc_list = "\n".join(f"- [{did}] {name}" for did, name in sorted(doc_names.items()))
             prompt += f"\n\n可用文档：\n{doc_list}"
@@ -309,7 +321,7 @@ class AgentOrchestrator:
         prompt += f"\n\n用户问题：{question}"
 
         try:
-            result = self.rag_engine.llm.invoke([("human", prompt)])
+            result = self.llm.invoke([("human", prompt)])
             data = self._parse_json(result.content)
             if not isinstance(data, dict) or "tasks" not in data:
                 raise PlannerError("Planner 输出缺少 'tasks' 字段")

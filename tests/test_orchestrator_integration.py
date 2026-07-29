@@ -45,17 +45,13 @@ def mock_redis_store():
 
 
 @pytest.fixture
-def mock_rag_engine():
-    engine = MagicMock()
-    engine.vector_store = MagicMock()
-    engine.vector_store.get_document_names = MagicMock(return_value={})
-    engine.llm = MagicMock()
-    return engine
+def mock_llm():
+    return MagicMock()
 
 
 @pytest.fixture
-def orchestrator(mock_rag_engine, mock_agent_memory, mock_redis_store, mock_mcp_client):
-    return AgentOrchestrator(mock_rag_engine, mock_agent_memory, mock_redis_store, mock_mcp_client)
+def orchestrator(mock_llm, mock_agent_memory, mock_redis_store, mock_mcp_client):
+    return AgentOrchestrator(mock_llm, mock_agent_memory, mock_redis_store, mock_mcp_client)
 
 
 def _make_execute_mock(side_effect=None):
@@ -86,7 +82,7 @@ class TestDAGExecution:
                 TaskNode(id="task3", agent="generator", objective="回答", depends_on=["task2"]),
             ],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         async def retrieval_side_effect(ctx, task_id="", **kw):
             ctx.set_output("document_bundle", DocumentBundle(chunks=[]), producer="retrieval")
@@ -125,7 +121,7 @@ class TestDAGExecution:
                 TaskNode(id="task2", agent="retrieval", objective="获取数据B", depends_on=["task1"]),
             ],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         executed_tasks = []
         mcp_clients_received = []
@@ -159,7 +155,7 @@ class TestDAGExecution:
                 TaskNode(id="task2", agent="retrieval", objective="数据B", depends_on=[]),
             ],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         execution_order = []
         async def retrieval_side_effect(ctx, task_id="", **kw):
@@ -198,7 +194,7 @@ class TestMCPSessionLifecycle:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -217,7 +213,7 @@ class TestMCPSessionLifecycle:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="retrieval", objective="出错", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         async def retrieval_fail(ctx, **kw):
             raise RuntimeError("搜索失败")
@@ -238,7 +234,7 @@ class TestMCPSessionLifecycle:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -258,7 +254,7 @@ class TestMCPSessionLifecycle:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -326,7 +322,7 @@ class TestMemoryIntegration:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -347,7 +343,7 @@ class TestMemoryIntegration:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -369,7 +365,7 @@ class TestMemoryIntegration:
             goal_outputs=["answer"],
             tasks=[TaskNode(id="task1", agent="chat", objective="测试", depends_on=[])],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
         orchestrator.registry.get_agent("chat").execute = AsyncMock(side_effect=lambda ctx, **kw: (
             ctx.set_output("answer", "答案", producer="chat"),
             type("AgentResult", (), {"outputs": {}, "actions": []})())[1])
@@ -397,7 +393,7 @@ class TestCriticRetry:
                 TaskNode(id="task4", agent="critic", objective="审核", depends_on=["task3"]),
             ],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         # 统计各 agent 执行次数
         call_counts = {"retrieval": 0, "extractor": 0, "generator": 0, "critic": 0}
@@ -466,7 +462,7 @@ class TestCriticRetry:
                 TaskNode(id="task4", agent="critic", objective="审核", depends_on=["task3"]),
             ],
         )
-        orchestrator._plan = MagicMock(return_value=plan)
+        orchestrator._plan = AsyncMock(return_value=plan)
 
         call_counts = {"retrieval": 0, "extractor": 0, "generator": 0, "critic": 0}
 

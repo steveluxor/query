@@ -21,7 +21,7 @@ class ChatAgent(BaseAgent):
     )
 
     async def run(self, context: AgentContext, **kwargs) -> AgentContext:
-        from app.core.llm_factory import create_llm
+        from app.core.infra.llm_factory import create_llm
         llm = create_llm(temperature=0.1, max_tokens=512)
 
         prefs_text = ""

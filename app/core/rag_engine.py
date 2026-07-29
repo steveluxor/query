@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from langchain_core.tools import tool
 
 from app.config import settings
-from app.core.vector_store import VectorStore
+from app.core.infra.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class RAGEngine:
 
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
-        from app.core.llm_factory import create_llm
+        from app.core.infra.llm_factory import create_llm
         self.llm = create_llm()
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除

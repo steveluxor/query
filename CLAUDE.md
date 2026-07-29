@@ -35,6 +35,9 @@ query/
 ├── .env
 ├── Dockerfile
 ├── docker-compose.yml
+├── docs/                       # 文档归档
+│   ├── archive/                # 历史设计文档
+│   └── plan/                   # 架构设计文档
 └── app/
     ├── main.py                  # FastAPI 入口
     ├── config.py                # 配置管理
@@ -47,12 +50,18 @@ query/
     │   ├── agent_context.py     # Agent 上下文
     │   ├── agent_memory.py      # 记忆系统
     │   ├── agent_orchestrator.py # Agent 编排器
+    │   ├── agent_registry.py    # Agent 能力注册
     │   ├── document_processor.py # 文档解析/切片
     │   ├── rag_engine.py        # RAG 引擎
-    │   ├── redis_store.py       # Redis 存储
-    │   ├── vector_store.py      # 向量数据库
-    │   ├── prompt_manager.py    # 提示词管理
-    │   ├── prompts.yaml         # 提示词模板
+    │   ├── workflow_validator.py # DAG 校验
+    │   ├── utils.py             # 通用工具
+    │   ├── infra/               # 基础设施层
+    │   │   ├── redis_store.py   # Redis 存储
+    │   │   ├── vector_store.py  # 向量数据库
+    │   │   └── llm_factory.py   # LLM 客户端工厂
+    │   ├── prompts/             # 提示词管理
+    │   │   ├── prompt_manager.py # 提示词管理器
+    │   │   └── prompts.yaml     # 提示词模板
     │   ├── mcp/                 # MCP 协议层
     │   │   ├── client.py        # MCP Client
     │   │   ├── server.py        # MCP Server
@@ -63,6 +72,9 @@ query/
     │   │   ├── knowledge_agent.py   # 知识检索
     │   │   ├── analysis_agent.py    # 数据分析
     │   │   └── critic_agent.py      # 答案审核
+    │   ├── actions/             # Control Action
+    │   │   ├── retry.py         # 重试处理
+    │   │   └── terminate.py     # 终止处理
     │   └── generator/
     │       └── answer_generator.py  # 答案生成
     └── models/
@@ -262,7 +274,7 @@ LLM 配置: temperature=0.1, max_tokens=4096
 | `_check_preference_changes(memory, question)` | LLM 判断偏好变化 (新增/修改/删除)，每轮调用 |
 | `_extract_doc_facts(turn)` | 从 document_names/document_ids 提取文档事实 |
 
-### `app/core/redis_store.py` — Redis 存储
+### `app/core/infra/redis_store.py` — Redis 存储
 
 只读封装，写入由 Java 负责。
 
@@ -277,7 +289,7 @@ LLM 配置: temperature=0.1, max_tokens=4096
 
 Key 格式: `qa:history:{session_id}`, `qa:memory:{session_id}`
 
-### `app/core/vector_store.py` — 向量数据库
+### `app/core/infra/vector_store.py` — 向量数据库
 
 Chroma + Ollama Embeddings 封装。
 
@@ -336,7 +348,7 @@ Chroma + Ollama Embeddings 封装。
 
 支持格式: .pdf (PyPDFLoader), .docx (Docx2txtLoader), .doc (WordDocLoader/COM), .txt/.md (TextLoader), .xlsx (ExcelLoader)
 
-### `app/core/prompt_manager.py` — 提示词管理
+### `app/core/prompts/prompt_manager.py` — 提示词管理
 
 | 方法 | 说明 |
 |------|------|
@@ -443,4 +455,4 @@ docker compose logs -f python-ai
 | Agent 分类逻辑 | `core/agents/coordinator_agent.py` | CLASSIFY_SYSTEM prompt |
 | 搜索/计算限制 | `core/rag_engine.py` | search_count>2, agg_count>8 |
 | Critic 重试次数 | `core/agent_orchestrator.py` | MAX_CRITIC_RETRIES=2 |
-| 提示词模板 | `core/prompts.yaml` | knowledge/analysis/generator/critic/planner |
+| 提示词模板 | `core/prompts/prompts.yaml` | knowledge/analysis/generator/critic/planner |

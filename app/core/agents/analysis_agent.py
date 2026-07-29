@@ -8,7 +8,7 @@ from app.core.agent_context import AgentContext
 from app.core.rag_engine import RAGEngine
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
-from app.core.prompt_manager import PromptManager
+from app.core.prompts.prompt_manager import PromptManager
 from app.models.data_types import AnalysisResult, Calculation
 from app.models.capability import AgentCapability
 
@@ -35,8 +35,8 @@ class AnalysisAgent(BaseAgent):
         },
     )
 
-    def __init__(self, rag_engine: RAGEngine):
-        self.engine = rag_engine
+    def __init__(self, llm=None):
+        self.llm = llm
 
     async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "", **kwargs) -> AgentContext:
         tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["read_all_rows", "calculate_sum", "calculate_rank"])
@@ -47,7 +47,7 @@ class AnalysisAgent(BaseAgent):
             system_prompt += f"\n\n<长期记忆>\n{context.memory_context}\n</长期记忆>"
 
         agent = create_agent(
-            model=self.engine.llm,
+            model=self.llm,
             tools=tools,
             system_prompt=system_prompt,
         )

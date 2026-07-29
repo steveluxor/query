@@ -4,7 +4,7 @@ import re
 
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.core.llm_factory import create_llm
+from app.core.infra.llm_factory import create_llm
 from app.models.capability import AgentCapability
 from app.models.data_types import DocumentBundle, DocumentChunk, RetrievalReport
 

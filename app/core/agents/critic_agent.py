@@ -4,7 +4,7 @@ import logging
 from app.config import settings
 from app.core.agents.base_agent import ControllerAgent
 from app.core.agent_context import AgentContext
-from app.core.prompt_manager import PromptManager
+from app.core.prompts.prompt_manager import PromptManager
 from app.models.data_types import CriticResult, AgentTrace, AnalysisResult, RetrievalReport
 from app.models.capability import AgentCapability
 from app.models.control import ControlAction
@@ -41,7 +41,7 @@ class CriticAgent(ControllerAgent):
     )
 
     def __init__(self):
-        from app.core.llm_factory import create_llm
+        from app.core.infra.llm_factory import create_llm
         self.llm = create_llm(temperature=0)
 
     def parse_actions(self, context: AgentContext) -> list[ControlAction]:

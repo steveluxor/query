@@ -11,7 +11,7 @@ from app.core.agent_memory import AgentMemory, SessionMemory, Fact, Milestone
 @pytest.fixture
 def memory():
     """创建 AgentMemory 实例，mock LLM 避免实际调用"""
-    with patch("app.core.llm_factory.create_llm"):
+    with patch("app.core.infra.llm_factory.create_llm"):
         return AgentMemory(max_sessions=5, idle_ttl=60)
 
 
@@ -46,7 +46,7 @@ class TestHasSession:
 
 class TestEviction:
     def test_evict_idle_session(self):
-        with patch("app.core.llm_factory.create_llm"):
+        with patch("app.core.infra.llm_factory.create_llm"):
             mem = AgentMemory(max_sessions=100, idle_ttl=0)
         mem.get_or_create("s1")
         time.sleep(0.01)
@@ -55,7 +55,7 @@ class TestEviction:
         assert mem.has_session("s1") is False
 
     def test_evict_lru(self):
-        with patch("app.core.llm_factory.create_llm"):
+        with patch("app.core.infra.llm_factory.create_llm"):
             mem = AgentMemory(max_sessions=3, idle_ttl=9999)
         # Manually insert 4 sessions to exceed max, then call _evict_if_needed
         from app.core.agent_memory import SessionMemory

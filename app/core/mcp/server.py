@@ -5,7 +5,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from app.config import settings
-from app.core.vector_store import VectorStore
+from app.core.infra.vector_store import VectorStore
 from app.core.rag_engine import RAGEngine, SearchContext
 from app.core.mcp.session_manager import SessionManager
 
@@ -129,6 +129,23 @@ async def read_all_rows(session_id: str, task_id: str = "") -> str:
         return "请先调用 search_documents 搜索数据。"
 
     return rag_engine._execute_read_all_rows(ctx)
+
+
+@mcp.tool()
+async def add_documents(session_id: str, document_id: int, texts: list[str], metadatas: list[dict]) -> str:
+    """向知识库添加文档切片（ingestion 专用）。先删除旧向量，再写入新切片。"""
+    logger.info("[MCP] add_documents (session=%s): document_id=%d, chunks=%d", session_id[:8], document_id, len(texts))
+    rag_engine.vector_store.delete_by_document_id(document_id)
+    rag_engine.vector_store.add_texts(texts, metadatas)
+    return f"已添加 {len(texts)} 个切片"
+
+
+@mcp.tool()
+async def delete_document(session_id: str, document_id: int) -> str:
+    """从知识库中删除指定文档的所有切片。"""
+    logger.info("[MCP] delete_document (session=%s): document_id=%d", session_id[:8], document_id)
+    rag_engine.vector_store.delete_by_document_id(document_id)
+    return f"已删除文档 {document_id}"
 
 
 @mcp.tool()

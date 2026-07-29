@@ -60,7 +60,7 @@ class AgentMemory:
         self._idle_ttl = idle_ttl
 
         # 缓存 LLM 实例，避免每次重写都创建新的
-        from app.core.llm_factory import create_llm
+        from app.core.infra.llm_factory import create_llm
         self._summary_llm = create_llm(temperature=0.1, max_tokens=256)
 
     # ==================== 公开接口 ====================

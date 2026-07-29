@@ -10,15 +10,13 @@ from app.models.data_types import AnalysisResult
 
 
 @pytest.fixture
-def mock_rag_engine():
-    engine = MagicMock()
-    engine.llm = MagicMock()
-    return engine
+def mock_llm():
+    return MagicMock()
 
 
 @pytest.fixture
-def agent(mock_rag_engine):
-    return AnalysisAgent(mock_rag_engine)
+def agent(mock_llm):
+    return AnalysisAgent(mock_llm)
 
 
 @pytest.fixture

@@ -54,6 +54,8 @@ class MCPClient:
     # consumer 工具不注入 task_id，始终读共享的 search_ctx
     # producer（search_documents）仍需 task_id 实现写隔离
     _CONSUMER_TOOLS = {"calculate_sum", "calculate_rank", "read_all_rows"}
+    # ingestion 工具不注入 task_id
+    _INGESTION_TOOLS = {"add_documents", "delete_document"}
 
     async def call_tool(self, tool_name: str, arguments: dict, session_id: str = "") -> str:
         """调用工具，自动注入 session_id + task_id（内部 tool 和 consumer tool 除外）"""
@@ -62,8 +64,8 @@ class MCPClient:
 
         if session_id and tool_name not in self._NO_SESSION_TOOLS:
             arguments = {"session_id": session_id, **arguments}
-            # 只有 producer 工具才注入 task_id（task 隔离写），consumer 工具统一读 search_ctx
-            if tool_name not in self._CONSUMER_TOOLS:
+            # 只有 producer 工具才注入 task_id（task 隔离写），consumer/ingestion 工具不需要
+            if tool_name not in self._CONSUMER_TOOLS and tool_name not in self._INGESTION_TOOLS:
                 from app.core.agent_context import _task_id_var
                 task_id = _task_id_var.get()
                 if task_id:

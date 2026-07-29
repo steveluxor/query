@@ -120,7 +120,7 @@ class AgentRegistry:
         return "\n".join(lines)
 
 
-def create_default_registry(rag_engine=None) -> AgentRegistry:
+def create_default_registry(llm=None) -> AgentRegistry:
     """创建并填充默认 Registry — 所有 Agent 在此注册（含实例化）"""
     from app.core.agents.analysis_agent import AnalysisAgent
     from app.core.agents.critic_agent import CriticAgent
@@ -129,8 +129,8 @@ def create_default_registry(rag_engine=None) -> AgentRegistry:
     from app.core.agents.extraction_agent import ExtractionAgent
     from app.core.generator.answer_generator import AnswerGenerator
 
-    # 实例化（依赖 rag_engine 的 Agent 需要传入）
-    analysis = AnalysisAgent(rag_engine) if rag_engine else AnalysisAgent.__new__(AnalysisAgent)
+    # 实例化（依赖 llm 的 Agent 需要传入）
+    analysis = AnalysisAgent(llm) if llm else AnalysisAgent.__new__(AnalysisAgent)
     critic = CriticAgent()
     chat = ChatAgent()
     generator = AnswerGenerator()
