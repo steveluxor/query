@@ -5,7 +5,7 @@ from app.config import settings
 from app.core.agent_context import AgentContext
 from app.core.agents.base_agent import BaseAgent
 from app.core.prompts.prompt_manager import PromptManager
-from app.models.data_types import AgentTrace, AnalysisResult, Evidence, KnowledgeObject
+from app.models.data_types import AgentTrace, AnalysisResult, CodeResult, Evidence, KnowledgeObject
 from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,9 @@ class AnswerGenerator(BaseAgent):
             "evidence_list": list[Evidence],
             "source_meta": list[dict],
             "analysis_result": AnalysisResult | None,
+            "code_result": CodeResult | None,
         },
-        required_inputs={"structured_knowledge", "evidence_list", "source_meta"},
+        required_inputs=set(),
         outputs={
             "answer": str,
         },
@@ -56,8 +57,9 @@ class AnswerGenerator(BaseAgent):
         if not isinstance(sources, list):
             sources = []
         analysis = kwargs.get("analysis_result")
+        code_result = kwargs.get("code_result")
 
-        prompt = self._build_prompt(context, evidence_list=evidences, analysis_result=analysis, source_meta=sources, structured_knowledge=knowledge)
+        prompt = self._build_prompt(context, evidence_list=evidences, analysis_result=analysis, source_meta=sources, structured_knowledge=knowledge, code_result=code_result)
 
         try:
             result = await self.llm.ainvoke([("human", prompt)])
@@ -77,7 +79,7 @@ class AnswerGenerator(BaseAgent):
             output_summary=f"answer_len={len(context.get_output('answer') or '')}",
         ))
 
-    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_result=None, source_meta=None, structured_knowledge=None) -> str:
+    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_result=None, source_meta=None, structured_knowledge=None, code_result=None) -> str:
         """构建 Generator prompt — 只包含 question/evidence/analysis/sources"""
         parts = [PromptManager.get("generator", "system"), ""]
 
@@ -120,6 +122,18 @@ class AnswerGenerator(BaseAgent):
                 parts.append(f"\n结论：\n" + "\n".join(f"  - {c}" for c in a.conclusions))
         else:
             parts.append("\n分析结果：无")
+
+        # 代码执行结果
+        if code_result and code_result.success:
+            parts.append(f"\n代码执行结果：")
+            if code_result.output is not None:
+                parts.append(f"  结果：{code_result.output}")
+            if code_result.stdout:
+                parts.append(f"  输出：{code_result.stdout}")
+            if code_result.image_paths:
+                parts.append("  已生成图表，图片将单独展示在回答下方。")
+        elif code_result and not code_result.success:
+            parts.append(f"\n代码执行失败：{code_result.error}")
 
         # 来源
         if source_meta:

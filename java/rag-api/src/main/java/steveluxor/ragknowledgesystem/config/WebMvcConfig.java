@@ -28,7 +28,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/user/login",
                         "/user/send-code",
                         "/document/*/status",
-                        "/document/*/download"
+                        "/document/*/download",
+                        "/charts/**"
                 );
 
         // 限流拦截器（放在登录之后，需要用户已登录）
@@ -38,7 +39,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/user/login",
                         "/user/send-code",
                         "/document/*/status",
-                        "/document/*/download"
+                        "/document/*/download",
+                        "/charts/**"
                 );
     }
 }

@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles
 
 from app.api import ingestion, qa
 from app.core.infra.llm_factory import create_llm
@@ -67,6 +68,10 @@ app.add_middleware(
 
 app.include_router(ingestion.router)
 app.include_router(qa.router)
+
+# 挂载生成的图表文件目录
+os.makedirs("generated", exist_ok=True)
+app.mount("/generated", StaticFiles(directory="generated"), name="generated")
 
 
 @app.exception_handler(BizException)

@@ -1,8 +1,11 @@
+import os
+
 from fastapi import APIRouter, Depends, Request
 
 from app.core.agent_memory import AgentMemory
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.agent_context import AgentContext
+from app.models.data_types import CodeResult
 from app.models.schemas import QuestionRequest, MultiAgentResponse, Source, AgentStepInfo
 
 
@@ -47,6 +50,12 @@ async def ask_question(
     if context.session_id:
         memory_data = agent_memory.to_dict(context.session_id)
 
+    # 图片数据：从 CodeResult.image_data 取 base64 编码的 PNG
+    image_urls = []
+    code_result = context.get_output("code_result")
+    if isinstance(code_result, CodeResult) and code_result.image_data:
+        image_urls = code_result.image_data
+
     return MultiAgentResponse(
         answer=context.get_output("answer") or "",
         sources=[Source(**s) for s in (context.get_output("sources") or [])],
@@ -59,4 +68,5 @@ async def ask_question(
             AgentStepInfo(name=s.name, duration_ms=s.duration_ms, summary=s.summary)
             for s in context.steps
         ],
+        image_urls=image_urls,
     )

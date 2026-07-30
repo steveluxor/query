@@ -20,4 +20,5 @@ public class QaHistory extends BaseEntity {
     private String sources;
     private Long sessionId;
     private Boolean isAgg;
+    private String imageUrls;  // MinIO objectName 列表(JSON)
 }

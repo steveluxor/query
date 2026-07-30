@@ -42,6 +42,20 @@ class AnalysisResult:
 
 
 @dataclass
+class CodeResult:
+    """CodeAgent 的执行结果"""
+    code: str = ""                          # 生成的 Python 代码
+    output: Any = None                      # result 变量的值
+    stdout: str = ""                        # 标准输出
+    error: str = ""                         # 错误信息
+    success: bool = True                    # 是否执行成功
+    execution_time_ms: int = 0              # 执行耗时
+    retry_count: int = 0                    # 重试次数
+    image_paths: list[str] = field(default_factory=list)  # 生成的图表路径（本地临时）
+    image_data: list[str] = field(default_factory=list)   # base64 编码的 PNG 数据
+
+
+@dataclass
 class CriticResult:
     """Critic Agent 的审核结果"""
     score: int = 10                     # 1-10

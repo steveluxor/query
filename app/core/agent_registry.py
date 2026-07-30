@@ -127,6 +127,7 @@ def create_default_registry(llm=None) -> AgentRegistry:
     from app.core.agents.chat_agent import ChatAgent
     from app.core.agents.retrieval_agent import RetrievalAgent
     from app.core.agents.extraction_agent import ExtractionAgent
+    from app.core.agents.code_agent import CodeAgent
     from app.core.generator.answer_generator import AnswerGenerator
 
     # 实例化（依赖 llm 的 Agent 需要传入）
@@ -136,9 +137,10 @@ def create_default_registry(llm=None) -> AgentRegistry:
     generator = AnswerGenerator()
     retrieval = RetrievalAgent()
     extractor = ExtractionAgent()
+    code_agent = CodeAgent(llm) if llm else CodeAgent.__new__(CodeAgent)
 
     registry = AgentRegistry()
-    for agent in [analysis, critic, chat, generator, retrieval, extractor]:
+    for agent in [analysis, critic, chat, generator, retrieval, extractor, code_agent]:
         if hasattr(agent, 'capability') and agent.capability:
             registry.register(agent.capability, agent)
     return registry

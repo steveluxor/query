@@ -1015,6 +1015,29 @@ input::placeholder {
     margin: 16px 0;
 }
 
+.qa-answer .markdown-body table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 13px;
+}
+
+.qa-answer .markdown-body th,
+.qa-answer .markdown-body td {
+    border: 1px solid var(--gray-200);
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.qa-answer .markdown-body th {
+    background: var(--gray-100);
+    font-weight: 600;
+}
+
+.qa-answer .markdown-body tr:nth-child(even) {
+    background: var(--gray-50);
+}
+
 .qa-msg-time {
     font-size: 11px;
     color: var(--gray-400);
@@ -1320,4 +1343,32 @@ input::placeholder {
 
 .rename-input:focus {
     border-color: var(--primary);
+}
+
+/* ============================================
+   图表图片样式
+   ============================================ */
+
+.qa-chart-img {
+    display: block;
+    max-width: 100%;
+    max-height: 500px;
+    margin: 16px auto 8px auto;
+    border-radius: var(--radius);
+    border: 1px solid var(--gray-200);
+    cursor: pointer;
+    transition: box-shadow var(--transition);
+    clear: both;
+}
+
+.qa-chart-img:hover {
+    box-shadow: var(--shadow-md);
+}
+
+.qa-chart-container {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--gray-200);
 }

@@ -23,6 +23,11 @@ import steveluxor.ragknowledgesystem.mapper.QaHistoryMapper;
 import steveluxor.ragknowledgesystem.mapper.QaSessionMapper;
 import steveluxor.ragknowledgesystem.service.QaService;
 
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
+
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -30,9 +35,12 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import org.springframework.util.DigestUtils;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -51,6 +59,8 @@ public class QaServiceImpl implements QaService {
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final MinioClient minioClient;
+    private final String bucketName;
 
     @Autowired
     public QaServiceImpl(
@@ -58,11 +68,15 @@ public class QaServiceImpl implements QaService {
             QaSessionMapper qaSessionMapper,
             DocumentMapper documentMapper,
             StringRedisTemplate redisTemplate,
+            MinioClient minioClient,
+            @org.springframework.beans.factory.annotation.Value("${minio.bucket-name}") String bucketName,
             @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
         this.qaHistoryMapper = qaHistoryMapper;
         this.qaSessionMapper = qaSessionMapper;
         this.documentMapper = documentMapper;
         this.redisTemplate = redisTemplate;
+        this.minioClient = minioClient;
+        this.bucketName = bucketName;
         this.pythonBaseUrl = pythonBaseUrl;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
@@ -219,6 +233,34 @@ public class QaServiceImpl implements QaService {
                 log.info("对话历史写入 Redis: sessionId={}", sessionIdStr);
             }
 
+            // 4c. 提取 base64 图片，上传 MinIO
+            String imageUrlsJson = null;
+            Object imageUrlsObj = pythonResp.get("image_urls");
+            if (imageUrlsObj instanceof List<?> imageList && !imageList.isEmpty()) {
+                List<String> minioObjectNames = new ArrayList<>();
+                for (Object item : imageList) {
+                    if (item instanceof String base64Str && !base64Str.isEmpty()) {
+                        try {
+                            byte[] imageBytes = Base64.getDecoder().decode(base64Str);
+                            String objectName = "charts/" + UUID.randomUUID() + ".png";
+                            minioClient.putObject(PutObjectArgs.builder()
+                                    .bucket(bucketName)
+                                    .object(objectName)
+                                    .stream(new ByteArrayInputStream(imageBytes), imageBytes.length, -1)
+                                    .contentType("image/png")
+                                    .build());
+                            minioObjectNames.add(objectName);
+                            log.info("图表上传 MinIO: {}", objectName);
+                        } catch (Exception e) {
+                            log.warn("图表上传 MinIO 失败: {}", e.getMessage());
+                        }
+                    }
+                }
+                if (!minioObjectNames.isEmpty()) {
+                    imageUrlsJson = objectMapper.writeValueAsString(minioObjectNames);
+                }
+            }
+
             // 5. 保存问答历史
             QaHistory history = QaHistory.builder()
                     .userId(userId)
@@ -227,6 +269,7 @@ public class QaServiceImpl implements QaService {
                     .answer(answer)
                     .sources(sourcesJson)
                     .isAgg(isAgg)
+                    .imageUrls(imageUrlsJson)
                     .createUser(userId)
                     .build();
             qaHistoryMapper.insert(history);
@@ -290,6 +333,7 @@ public class QaServiceImpl implements QaService {
         if (history == null) {
             throw new BizException(QA_RECORD_NOT_EXIST);
         }
+        deleteMinioImages(history);
         qaHistoryMapper.deleteById(id);
         return Result.ok();
     }
@@ -299,6 +343,11 @@ public class QaServiceImpl implements QaService {
         if (ids == null || ids.isEmpty()) {
             throw new BizException(QA_SELECT_RECORD_FIRST);
         }
+        // 先查出记录，删除 MinIO 图片
+        List<QaHistory> histories = qaHistoryMapper.selectByUserId(userId).stream()
+                .filter(h -> ids.contains(h.getId()))
+                .collect(Collectors.toList());
+        histories.forEach(this::deleteMinioImages);
         qaHistoryMapper.deleteBatch(ids, userId);
         return Result.ok();
     }
@@ -311,6 +360,9 @@ public class QaServiceImpl implements QaService {
         if (session == null || !session.getUserId().equals(userId)) {
             throw new BizException(QA_SESSION_NOT_EXIST);
         }
+        // 先查出记录，删除 MinIO 图片
+        List<QaHistory> histories = qaHistoryMapper.selectBySessionId(sessionId, userId);
+        histories.forEach(this::deleteMinioImages);
         qaHistoryMapper.deleteBySessionId(sessionId, userId);
         qaSessionMapper.deleteById(sessionId);
 
@@ -322,5 +374,27 @@ public class QaServiceImpl implements QaService {
 
         log.info("删除会话及历史: sessionId={}, userId={}", sessionId, userId);
         return Result.ok();
+    }
+
+    /**
+     * 删除问答记录关联的 MinIO 图片
+     */
+    private void deleteMinioImages(QaHistory history) {
+        if (history == null || history.getImageUrls() == null) return;
+        try {
+            List<String> objectNames = objectMapper.readValue(history.getImageUrls(),
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
+            for (String objName : objectNames) {
+                try {
+                    minioClient.removeObject(RemoveObjectArgs.builder()
+                            .bucket(bucketName).object(objName).build());
+                    log.info("删除 MinIO 图片: {}", objName);
+                } catch (Exception e) {
+                    log.warn("删除 MinIO 图片失败: {}", objName, e);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("解析 imageUrls 失败: {}", e.getMessage());
+        }
     }
 }

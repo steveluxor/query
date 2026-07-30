@@ -202,7 +202,40 @@
         // 代码块 (```)
         html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
 
+        // 表格处理
         const lines = html.split('\n');
+        let i = 0;
+        while (i < lines.length) {
+            // 检测表格：第一行有 |，第二行是分隔符 |---|
+            if (i + 1 < lines.length &&
+                lines[i].includes('|') &&
+                /^\|[\s\-:|]+\|$/.test(lines[i + 1].trim())) {
+                const tableLines = [];
+                while (i < lines.length && lines[i].includes('|')) {
+                    tableLines.push(lines[i]);
+                    i++;
+                }
+                // 解析表格
+                const headerCells = tableLines[0].split('|').map(c => c.trim()).filter(c => c);
+                let tableHtml = '<table><thead><tr>';
+                headerCells.forEach(c => { tableHtml += `<th>${c}</th>`; });
+                tableHtml += '</tr></thead><tbody>';
+                for (let j = 2; j < tableLines.length; j++) {
+                    const cells = tableLines[j].split('|').map(c => c.trim()).filter(c => c);
+                    if (cells.length > 0) {
+                        tableHtml += '<tr>';
+                        cells.forEach(c => { tableHtml += `<td>${c}</td>`; });
+                        tableHtml += '</tr>';
+                    }
+                }
+                tableHtml += '</tbody></table>';
+                lines.splice(i - tableLines.length, tableLines.length, tableHtml);
+                i = i - tableLines.length + 1;
+            } else {
+                i++;
+            }
+        }
+
         const result = [];
         let inList = false;
         let listType = null;
@@ -639,7 +672,21 @@
             container.innerHTML = '<div class="qa-empty">暂无问答记录，请在下方提问</div>';
             return;
         }
-        container.innerHTML = messages.map(msg => `
+        container.innerHTML = messages.map(msg => {
+            let imagesHtml = '';
+            if (msg.imageUrls) {
+                try {
+                    const urls = JSON.parse(msg.imageUrls);
+                    if (Array.isArray(urls) && urls.length > 0) {
+                        imagesHtml = '<div class="qa-chart-container">' + urls.map(name => {
+                            // name 可能是 "charts/xxx.png" 或 "xxx.png"
+                            const path = name.startsWith('charts/') ? name : `charts/${name}`;
+                            return `<img src="/${path}" class="qa-chart-img" alt="图表" />`;
+                        }).join('') + '</div>';
+                    }
+                } catch {}
+            }
+            return `
             <div class="qa-message-group" data-id="${msg.id}">
                 <div class="qa-group-controls">
                     <button class="qa-delete-single" data-id="${msg.id}" title="删除此条记录">&times;</button>
@@ -651,10 +698,11 @@
                 </div>
                 <div class="qa-msg qa-answer">
                     <div class="qa-msg-label">答</div>
-                    <div class="qa-msg-content markdown-body">${renderMarkdown(msg.answer)}</div>
+                    <div class="qa-msg-content markdown-body">${renderMarkdown(msg.answer)}${imagesHtml}</div>
                 </div>
             </div>
-        `).join('');
+            `;
+        }).join('');
         container.scrollTop = container.scrollHeight;
     }
 

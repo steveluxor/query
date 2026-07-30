@@ -66,3 +66,4 @@ class MultiAgentResponse(BaseModel):
     reflection_count: int = 0
     plan: list | None = None
     agent_trace: list[AgentStepInfo] = []
+    image_urls: list[str] = []
