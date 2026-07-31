@@ -21,4 +21,10 @@ public class QaHistory extends BaseEntity {
     private Long sessionId;
     private Boolean isAgg;
     private String imageUrls;  // MinIO objectName 列表(JSON)
+    private String plan;           // Agent 执行计划(DAG JSON)
+    private String agentTrace;     // Agent 执行轨迹(JSON)
+    private String generatedCode;  // CodeAgent 生成的代码
+    private String codeStdout;     // 代码执行标准输出
+    private String codeError;      // 代码执行错误信息
+    private Boolean codeSuccess;   // 代码执行是否成功
 }

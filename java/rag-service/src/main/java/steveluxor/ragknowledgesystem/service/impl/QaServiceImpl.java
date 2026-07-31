@@ -49,7 +49,7 @@ import java.util.stream.Collectors;
 public class QaServiceImpl implements QaService {
 
     private static final String ASK_PATH = "/qa/ask";
-    private static final Duration TIMEOUT = Duration.ofSeconds(120);
+    private static final Duration TIMEOUT = Duration.ofSeconds(300);
     private static final int TITLE_MAX_LENGTH = 50;
 
     private final String pythonBaseUrl;
@@ -186,6 +186,14 @@ public class QaServiceImpl implements QaService {
             String sourcesJson = objectMapper.writeValueAsString(sources);
             Boolean isAgg = (Boolean) pythonResp.getOrDefault("is_agg", false);
 
+            // 透传 Agent Runtime 元数据给前端（plan, agent_trace, code 等）
+            Object plan = pythonResp.get("plan");
+            Object agentTrace = pythonResp.get("agent_trace");
+            String generatedCode = (String) pythonResp.getOrDefault("generated_code", "");
+            String codeStdout = (String) pythonResp.getOrDefault("code_stdout", "");
+            String codeError = (String) pythonResp.getOrDefault("code_error", "");
+            Boolean codeSuccess = (Boolean) pythonResp.getOrDefault("code_success", true);
+
             // 4. 持久化记忆 V5：写入 Redis（Python AgentMemory + 对话历史，3天 TTL）
             if (request.getSessionId() != null) {
                 String sessionIdStr = String.valueOf(request.getSessionId());
@@ -262,6 +270,9 @@ public class QaServiceImpl implements QaService {
             }
 
             // 5. 保存问答历史
+            String planJson = plan != null ? objectMapper.writeValueAsString(plan) : null;
+            String agentTraceJson = agentTrace != null ? objectMapper.writeValueAsString(agentTrace) : null;
+
             QaHistory history = QaHistory.builder()
                     .userId(userId)
                     .sessionId(request.getSessionId())
@@ -270,9 +281,23 @@ public class QaServiceImpl implements QaService {
                     .sources(sourcesJson)
                     .isAgg(isAgg)
                     .imageUrls(imageUrlsJson)
+                    .plan(planJson)
+                    .agentTrace(agentTraceJson)
+                    .generatedCode(generatedCode != null && !generatedCode.isEmpty() ? generatedCode : null)
+                    .codeStdout(codeStdout != null && !codeStdout.isEmpty() ? codeStdout : null)
+                    .codeError(codeError != null && !codeError.isEmpty() ? codeError : null)
+                    .codeSuccess(codeSuccess)
                     .createUser(userId)
                     .build();
             qaHistoryMapper.insert(history);
+
+            // 5a. 写入 Redis 会话历史缓存（完整记录，前端加载用）
+            if (request.getSessionId() != null) {
+                String sessionHistoryKey = QA_SESSION_HISTORY_PREFIX + request.getSessionId();
+                String historyFullJson = objectMapper.writeValueAsString(history);
+                redisTemplate.opsForList().rightPush(sessionHistoryKey, historyFullJson);
+                redisTemplate.expire(sessionHistoryKey, QA_SESSION_HISTORY_TTL_SECONDS, TimeUnit.SECONDS);
+            }
 
             // 6. 写入 Redis 缓存（TTL 30 分钟）
             String historyJson = objectMapper.writeValueAsString(history);
@@ -289,7 +314,24 @@ public class QaServiceImpl implements QaService {
             }
 
             log.info("问答成功: userId={}, question={}", userId, request.getQuestion());
-            return Result.ok(history);
+
+            // 构建完整响应：数据库字段 + Agent Runtime 元数据
+            Map<String, Object> resultData = new HashMap<>();
+            resultData.put("id", history.getId());
+            resultData.put("question", history.getQuestion());
+            resultData.put("answer", history.getAnswer());
+            resultData.put("sources", sources);
+            resultData.put("is_agg", history.getIsAgg());
+            resultData.put("image_urls", imageUrlsJson != null ? objectMapper.readValue(imageUrlsJson, List.class) : List.of());
+            resultData.put("create_time", history.getCreateTime());
+            // Agent Runtime 元数据
+            resultData.put("plan", plan);
+            resultData.put("agent_trace", agentTrace);
+            resultData.put("generated_code", generatedCode);
+            resultData.put("code_stdout", codeStdout);
+            resultData.put("code_error", codeError);
+            resultData.put("code_success", codeSuccess);
+            return Result.ok(resultData);
         } catch (java.net.ConnectException e) {
             log.error("Python AI 服务连接失败: {}", e.getMessage());
             throw new BizException(AI_SERVICE_NOT_STARTED);
@@ -321,7 +363,39 @@ public class QaServiceImpl implements QaService {
     @Override
     public Result history(Long sessionId) {
         Long userId = CurrentUser.get();
+
+        // 1. 先查 Redis 会话历史缓存
+        String sessionHistoryKey = QA_SESSION_HISTORY_PREFIX + sessionId;
+        List<String> cached = redisTemplate.opsForList().range(sessionHistoryKey, 0, -1);
+        if (cached != null && !cached.isEmpty()) {
+            log.info("会话历史缓存命中: sessionId={}", sessionId);
+            List<QaHistory> list = cached.stream()
+                    .map(json -> {
+                        try { return objectMapper.readValue(json, QaHistory.class); }
+                        catch (Exception e) { log.warn("解析缓存失败: {}", e.getMessage()); return null; }
+                    })
+                    .filter(h -> h != null)
+                    .collect(Collectors.toList());
+            return Result.ok(list);
+        }
+
+        // 2. Redis 没有，查 MySQL
         List<QaHistory> list = qaHistoryMapper.selectBySessionId(sessionId, userId);
+
+        // 3. 回填 Redis
+        if (!list.isEmpty()) {
+            list.forEach(h -> {
+                try {
+                    String json = objectMapper.writeValueAsString(h);
+                    redisTemplate.opsForList().rightPush(sessionHistoryKey, json);
+                } catch (Exception e) {
+                    log.warn("回填 Redis 失败: {}", e.getMessage());
+                }
+            });
+            redisTemplate.expire(sessionHistoryKey, QA_SESSION_HISTORY_TTL_SECONDS, TimeUnit.SECONDS);
+            log.info("会话历史回填 Redis: sessionId={}, count={}", sessionId, list.size());
+        }
+
         return Result.ok(list);
     }
 
@@ -370,6 +444,7 @@ public class QaServiceImpl implements QaService {
         String sessionIdStr = String.valueOf(sessionId);
         redisTemplate.delete(QA_MEMORY_PREFIX + sessionIdStr);
         redisTemplate.delete(QA_HISTORY_PREFIX + sessionIdStr);
+        redisTemplate.delete(QA_SESSION_HISTORY_PREFIX + sessionIdStr);
         log.info("Redis 记忆已清除: sessionId={}", sessionIdStr);
 
         log.info("删除会话及历史: sessionId={}, userId={}", sessionId, userId);

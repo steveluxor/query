@@ -236,6 +236,9 @@ class AgentOrchestrator:
         _task_id_var.set(task.id)
         context.question = task.objective
 
+        import time as _time
+        task_start = _time.time()
+
         try:
             result = await agent.execute(
                 context, task_id=task.id,
@@ -243,6 +246,12 @@ class AgentOrchestrator:
                 original_question=original_question,
                 **upstream_kwargs,
             )
+
+            # 收集 Agent 执行元数据到 TaskNode（供前端 Agent Trace 展示）
+            task.duration_ms = int((_time.time() - task_start) * 1000)
+            task.summary = result.summary
+            task.tools_used = result.tools_used
+            task.artifacts = result.artifacts
 
             # outputs → context（由 Runtime 写入，Agent 只管返回）
             for key, value in result.outputs.items():
@@ -258,6 +267,8 @@ class AgentOrchestrator:
             if cap.tools:
                 context.tools_called.extend(cap.tools)
         except Exception as e:
+            task.duration_ms = int((_time.time() - task_start) * 1000)
+            task.summary = f"失败: {e}"
             logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
             task.status = TaskStatus.FAILED
             raise
@@ -436,6 +447,29 @@ class AgentOrchestrator:
                              if "." in v and v.split(".")[0] in extractor_ids]
                     for k in stale:
                         t.port_bindings.pop(k, None)
+
+        # === 规则 3：所有非 chat DAG 必须包含 critic ===
+        has_chat_only = len(plan.tasks) == 1 and plan.tasks[0].agent == "chat"
+        has_critic = any(t.agent == "critic" for t in plan.tasks)
+        if not has_chat_only and not has_critic:
+            generator_task = next((t for t in plan.tasks if t.agent == "generator"), None)
+            retrieval_task = next((t for t in plan.tasks if t.agent == "retrieval"), None)
+            extractor_task = next((t for t in plan.tasks if t.agent == "extractor"), None)
+            if generator_task:
+                max_id = max(int(t.id.replace("task", "")) for t in plan.tasks) + 1
+                bindings = {"generated_answer": f"{generator_task.id}.answer"}
+                if extractor_task:
+                    bindings["evidence_list"] = f"{extractor_task.id}.evidence"
+                if retrieval_task:
+                    bindings["retrieval_report"] = f"{retrieval_task.id}.retrieval_report"
+                critic_task = TaskNode(
+                    id=f"task{max_id}", agent="critic",
+                    objective="审核答案质量，必要时触发重试",
+                    depends_on=[generator_task.id],
+                    port_bindings=bindings,
+                )
+                plan.tasks.append(critic_task)
+                logger.info("[Orchestrator] 自动追加 critic task: %s", critic_task.id)
 
         return plan
 

@@ -55,6 +55,10 @@ public class Constants {
     public static final String QA_HISTORY_PREFIX = "qa:history:";
     public static final Long QA_MEMORY_TTL_SECONDS = 259200L; // 3天
 
+    // Redis 会话历史缓存（完整 QaHistory 含 plan/agent_trace/code，前端加载用，1天 TTL）
+    public static final String QA_SESSION_HISTORY_PREFIX = "qa:session:";
+    public static final Long QA_SESSION_HISTORY_TTL_SECONDS = 86400L; // 1天
+
     // Redis 接口限流（ZSET 滑动窗口，key 格式 rate:{userId}）
     public static final String RATE_LIMIT_PREFIX = "rate:";
     public static final Long RATE_LIMIT_MAX = 30L; // 每分钟最大请求数

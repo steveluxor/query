@@ -4,8 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RAG 知识系统</title>
-    <link rel="stylesheet" href="css/style.css">
-</head>
+    <link rel="stylesheet" href="css/style.css?v=12"></head>
 <body>
     <div id="app">
         <!-- 登录页面 -->
@@ -111,42 +110,60 @@
                     </div>
                 </section>
 
-                <!-- 问答视图 -->
+                <!-- 问答视图：Agent Workspace -->
                 <div id="qaView" style="display:none;">
-                    <div class="qa-layout">
-                        <aside class="qa-sidebar">
-                            <button id="newSessionBtn" class="btn btn-primary btn-block">+ 新建对话</button>
-                            <div class="qa-session-list" id="sessionList">
-                                <div class="qa-session-empty">暂无对话</div>
+                    <div class="workspace-layout">
+                        <!-- 左侧：会话列表 -->
+                        <aside class="session-panel">
+                            <button id="newSessionBtn" class="btn btn-primary btn-block">+ 新建任务</button>
+                            <div class="session-list" id="sessionList">
+                                <div class="session-empty">暂无任务</div>
                             </div>
                         </aside>
-                        <section class="card qa-section">
-                            <div class="qa-header">
-                                <div class="qa-header-left">
-                                    <h2 class="card-title" id="currentSessionTitle" style="margin:0; border:none; padding:0;">智能问答</h2>
-                                    <span class="qa-subtitle" id="sessionSubtitle">请选择或新建一个对话</span>
-                                </div>
-                                <div class="qa-header-right">
-                                    <button id="deleteSessionBtn" class="btn btn-danger btn-sm hidden">删除当前对话</button>
-                                </div>
-                            </div>
-                            <div class="qa-messages" id="qaMessages">
-                                <div class="qa-empty">请选择或新建一个对话</div>
-                            </div>
-                            <div class="qa-input-area">
-                                <div class="qa-toolbar">
+
+                        <!-- 中间：Agent Trace + 结果 -->
+                        <main class="main-panel">
+                            <!-- 输入区 -->
+                            <div class="input-bar">
+                                <div class="input-bar-left">
                                     <div class="qa-strategy-group" id="qaStrategyGroup">
                                         <button class="qa-strategy-btn active" data-value="0">默认</button>
                                         <button class="qa-strategy-btn" data-value="1">对比</button>
                                         <button class="qa-strategy-btn" data-value="2">专一</button>
                                     </div>
                                 </div>
-                                <div class="qa-input-row">
-                                    <input type="text" id="qaInput" placeholder="请输入您的问题..." maxlength="500">
-                                    <button id="qaSendBtn" class="btn btn-primary">发送</button>
+                                <div class="input-bar-row">
+                                    <input type="text" id="qaInput" placeholder="输入分析任务，例如：对比三个实验的差异..." maxlength="500">
+                                    <button id="qaSendBtn" class="btn btn-primary">执行</button>
                                 </div>
                             </div>
-                        </section>
+
+                            <!-- Agent Trace 时间线 -->
+                            <div class="agent-trace" id="agentTrace">
+                                <div class="trace-empty">
+                                    <div class="trace-empty-icon">&#x1F916;</div>
+                                    <div class="trace-empty-text">输入问题，Agent 将自主规划并执行任务</div>
+                                </div>
+                            </div>
+
+                            <!-- 结果工作区 -->
+                            <div class="result-workspace" id="resultWorkspace" style="display:none;">
+                                <div class="result-tabs" id="resultTabs">
+                                    <button class="result-tab active" data-tab="answer">回答</button>
+                                    <button class="result-tab" data-tab="charts">图表</button>
+                                    <button class="result-tab" data-tab="code">代码</button>
+                                </div>
+                                <div class="result-content" id="resultContent"></div>
+                            </div>
+                        </main>
+
+                        <!-- 右侧：DAG 任务图 -->
+                        <aside class="dag-panel" id="dagPanel">
+                            <div class="dag-header">任务图</div>
+                            <div class="dag-content" id="dagContent">
+                                <div class="dag-empty">执行任务后显示</div>
+                            </div>
+                        </aside>
                     </div>
                 </div>
 
@@ -194,7 +211,7 @@
     <!-- Toast 消息 -->
     <div id="toast" class="toast hidden"></div>
 
-    <script src="js/api.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/api.js?v=2"></script>
+    <script src="js/app.js?v=9"></script>
 </body>
 </html>

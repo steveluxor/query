@@ -37,18 +37,6 @@ const Api = (() => {
 
         try {
             const response = await fetch(`${BASE_URL}${url}`, config);
-
-            // 非 200 状态码提前处理（如 Nginx 504 超时返回 HTML）
-            if (!response.ok) {
-                const text = await response.text();
-                let msg = `请求失败 (${response.status})`;
-                try {
-                    const errJson = JSON.parse(text);
-                    msg = errJson.message || msg;
-                } catch (_) { /* 非 JSON 响应，使用默认消息 */ }
-                throw new Error(msg);
-            }
-
             const result = await response.json();
 
             if (result.code === 200) {

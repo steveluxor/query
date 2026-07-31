@@ -67,3 +67,7 @@ class MultiAgentResponse(BaseModel):
     plan: list | None = None
     agent_trace: list[AgentStepInfo] = []
     image_urls: list[str] = []
+    generated_code: str = ""       # CodeAgent 生成的 Python 代码
+    code_stdout: str = ""          # 代码执行的标准输出
+    code_error: str = ""           # 代码执行的错误信息（如有）
+    code_success: bool = True      # 代码执行是否成功

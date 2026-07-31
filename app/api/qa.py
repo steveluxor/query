@@ -37,11 +37,21 @@ async def ask_question(
 
     context = await orchestrator.run(context)
 
-    # plan 序列化：TaskGraph → list[dict]
+    # plan 序列化：TaskGraph → list[dict]（含执行元数据供前端 Agent Trace 展示）
     plan = None
     if context.plan and context.plan.tasks:
         plan = [
-            {"id": t.id, "agent": t.agent, "objective": t.objective, "depends_on": t.depends_on}
+            {
+                "id": t.id,
+                "agent": t.agent,
+                "objective": t.objective,
+                "depends_on": t.depends_on,
+                "status": t.status.value,
+                "duration_ms": t.duration_ms,
+                "summary": t.summary,
+                "tools_used": t.tools_used,
+                "artifacts": t.artifacts,
+            }
             for t in context.plan.tasks
         ]
 
@@ -50,11 +60,20 @@ async def ask_question(
     if context.session_id:
         memory_data = agent_memory.to_dict(context.session_id)
 
-    # 图片数据：从 CodeResult.image_data 取 base64 编码的 PNG
+    # 图片数据 + 代码数据：从 CodeResult 提取
     image_urls = []
+    generated_code = ""
+    code_stdout = ""
+    code_error = ""
+    code_success = True
     code_result = context.get_output("code_result")
-    if isinstance(code_result, CodeResult) and code_result.image_data:
-        image_urls = code_result.image_data
+    if isinstance(code_result, CodeResult):
+        if code_result.image_data:
+            image_urls = code_result.image_data
+        generated_code = code_result.code or ""
+        code_stdout = code_result.stdout or ""
+        code_error = code_result.error or ""
+        code_success = code_result.success
 
     return MultiAgentResponse(
         answer=context.get_output("answer") or "",
@@ -69,4 +88,8 @@ async def ask_question(
             for s in context.steps
         ],
         image_urls=image_urls,
+        generated_code=generated_code,
+        code_stdout=code_stdout,
+        code_error=code_error,
+        code_success=code_success,
     )

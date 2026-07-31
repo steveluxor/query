@@ -13,6 +13,12 @@
             <if test="sessionId != null">session_id,</if>
             <if test="isAgg != null">is_agg,</if>
             <if test="imageUrls != null">image_urls,</if>
+            <if test="plan != null">plan,</if>
+            <if test="agentTrace != null">agent_trace,</if>
+            <if test="generatedCode != null">generated_code,</if>
+            <if test="codeStdout != null">code_stdout,</if>
+            <if test="codeError != null">code_error,</if>
+            <if test="codeSuccess != null">code_success,</if>
             create_time,
             update_time,
         </trim>
@@ -25,6 +31,12 @@
             <if test="sessionId != null">#{sessionId},</if>
             <if test="isAgg != null">#{isAgg},</if>
             <if test="imageUrls != null">#{imageUrls},</if>
+            <if test="plan != null">#{plan},</if>
+            <if test="agentTrace != null">#{agentTrace},</if>
+            <if test="generatedCode != null">#{generatedCode},</if>
+            <if test="codeStdout != null">#{codeStdout},</if>
+            <if test="codeError != null">#{codeError},</if>
+            <if test="codeSuccess != null">#{codeSuccess},</if>
             #{createTime},
             #{updateTime},
         </trim>

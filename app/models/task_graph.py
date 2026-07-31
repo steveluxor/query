@@ -28,6 +28,12 @@ class TaskNode:
     # key=input port name, value="source_task_id.output_key" 全限定引用
     status: TaskStatus = TaskStatus.PENDING
 
+    # 执行元数据（由 Orchestrator 从 AgentResult 收集填充）
+    duration_ms: int = 0
+    summary: str = ""                      # Agent 自报的执行摘要
+    tools_used: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+
 
 @dataclass
 class TaskGraph:

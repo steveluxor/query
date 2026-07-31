@@ -81,9 +81,15 @@ class AgentResult:
 
     - outputs: 持久化到 context.outputs 的数据（evidence, analysis, answer 等）
     - actions: 一次性 Runtime 控制事件（retry, terminate 等），不落 context
+    - summary: Agent 自报的执行摘要（供前端 Agent Trace 展示）
+    - artifacts: Agent 生成的文件产物（如图表、代码文件）
+    - tools_used: Agent 使用的工具列表
     """
     outputs: dict[str, Any] = field(default_factory=dict)
     actions: list = field(default_factory=list)  # list[ControlAction] (避免循环导入)
+    summary: str = ""
+    artifacts: list[str] = field(default_factory=list)
+    tools_used: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -58,16 +58,17 @@
         docSections: document.querySelectorAll('.upload-section, .document-list-section'),
         qaView: $('#qaView'),
 
-        // 问答
+        // 问答 - Agent Workspace
         qaInput: $('#qaInput'),
         qaSendBtn: $('#qaSendBtn'),
         qaStrategyGroup: $('#qaStrategyGroup'),
-        qaMessages: $('#qaMessages'),
+        agentTrace: $('#agentTrace'),
+        resultWorkspace: $('#resultWorkspace'),
+        resultTabs: $('#resultTabs'),
+        resultContent: $('#resultContent'),
+        dagContent: $('#dagContent'),
         newSessionBtn: $('#newSessionBtn'),
         sessionList: $('#sessionList'),
-        deleteSessionBtn: $('#deleteSessionBtn'),
-        currentSessionTitle: $('#currentSessionTitle'),
-        sessionSubtitle: $('#sessionSubtitle'),
 
         // 个人信息
         profileBtn: $('#profileBtn'),
@@ -540,12 +541,12 @@
     function renderSessionList() {
         const container = els.sessionList;
         if (!state.sessions || state.sessions.length === 0) {
-            container.innerHTML = '<div class="qa-session-empty">暂无对话</div>';
+            container.innerHTML = '<div class="session-empty">暂无任务</div>';
             return;
         }
 
         container.innerHTML = state.sessions.map(s => {
-            const title = s.title || '新对话';
+            const title = s.title || '新任务';
             const isActive = Number(s.id) === state.currentSessionId;
             return `
                 <div class="qa-session-item ${isActive ? 'active' : ''}" data-session-id="${s.id}">
@@ -560,24 +561,16 @@
         els.qaInput.disabled = !enabled;
         els.qaSendBtn.disabled = !enabled;
         if (!enabled) {
-            els.qaInput.placeholder = '请先新建或选择一个对话';
+            els.qaInput.placeholder = '请先新建或选择一个任务';
         } else {
-            els.qaInput.placeholder = '请输入您的问题...';
+            els.qaInput.placeholder = '输入分析任务，例如：对比三个实验的差异...';
         }
     }
 
     function updateQaHeader() {
         if (state.currentSessionId) {
-            const session = state.sessions.find(s => s.id === state.currentSessionId);
-            const title = session?.title || '新对话';
-            els.currentSessionTitle.textContent = title;
-            els.sessionSubtitle.textContent = '在当前对话中提问';
-            els.deleteSessionBtn.classList.remove('hidden');
             enableQaInput(true);
         } else {
-            els.currentSessionTitle.textContent = '智能问答';
-            els.sessionSubtitle.textContent = '请选择或新建一个对话';
-            els.deleteSessionBtn.classList.add('hidden');
             enableQaInput(false);
         }
     }
@@ -608,7 +601,7 @@
             if (state.currentSessionId) {
                 loadQaHistory();
             } else {
-                renderQaMessages([]);
+                renderHistoricalMessages([]);
             }
         } catch (err) {
             console.error('获取会话列表失败:', err);
@@ -623,7 +616,7 @@
             // 重新加载会话列表
             await loadSessions();
             // 清空消息区
-            renderQaMessages([]);
+            renderHistoricalMessages([]);
             els.qaInput.focus();
             showToast('已创建新对话', 'success');
         } catch (err) {
@@ -662,58 +655,534 @@
     }
 
     // ============================================
-    // 问答
+    // Agent Workspace - 渲染
     // ============================================
     let qaLoading = false;
+    let lastResponse = null; // 缓存最近一次响应
 
-    function renderQaMessages(messages) {
-        const container = els.qaMessages;
-        if (!messages || messages.length === 0) {
-            container.innerHTML = '<div class="qa-empty">暂无问答记录，请在下方提问</div>';
+    const AGENT_LABELS = {
+        retrieval: '知识检索',
+        extraction: '知识提取',
+        analysis: '数据分析',
+        code: '代码执行',
+        generator: '答案生成',
+        critic: '质量审核',
+        chat: '对话响应',
+    };
+
+    const AGENT_ICONS = {
+        retrieval: '🔍',    // 🔍
+        extraction: '🔎',   // 🔎
+        analysis: '📊',     // 📊
+        code: '💻',         // 💻
+        generator: '✍️',    // ✍
+        critic: '🧠',       // 🧠
+        chat: '💬',         // 💬
+    };
+
+    function getAgentLabel(agent) {
+        return AGENT_LABELS[agent] || agent;
+    }
+
+    function getAgentIcon(agent) {
+        return AGENT_ICONS[agent] || '⚙️'; // ⚙️
+    }
+
+    // --- Agent Trace 时间线 ---
+    function renderAgentTrace(plan, agentTrace) {
+        if (!plan || plan.length === 0) return '';
+
+        // 合并 plan + agentTrace，按 plan 顺序
+        const steps = plan.map(task => {
+            const trace = (agentTrace || []).find(t => t.name === task.agent);
+            return {
+                id: task.id,
+                agent: task.agent,
+                objective: task.objective || '',
+                status: task.status || 'completed',
+                durationMs: task.duration_ms || (trace && trace.duration_ms) || 0,
+                summary: task.summary || (trace && trace.summary) || '',
+                toolsUsed: task.tools_used || [],
+                artifacts: task.artifacts || [],
+                dependsOn: task.depends_on || [],
+            };
+        });
+
+        let html = '<div class="trace-steps">';
+        steps.forEach((step, i) => {
+            const icon = getAgentIcon(step.agent);
+            const label = getAgentLabel(step.agent);
+            const statusClass = step.status === 'failed' ? 'failed' : 'completed';
+            const duration = step.durationMs >= 1000
+                ? (step.durationMs / 1000).toFixed(1) + 's'
+                : step.durationMs + 'ms';
+
+            let toolsHtml = '';
+            if (step.toolsUsed.length > 0) {
+                toolsHtml = '<div class="trace-tools">' +
+                    step.toolsUsed.map(t => `<span class="trace-tool-tag">${escapeHtml(t)}</span>`).join('') +
+                    '</div>';
+            }
+
+            let objectiveHtml = '';
+            if (step.objective) {
+                objectiveHtml = `<div class="trace-objective">${escapeHtml(step.objective)}</div>`;
+            }
+
+            let detailHtml = '';
+            const detailParts = [];
+            if (step.toolsUsed.length > 0) detailParts.push(`<div class="trace-detail-row"><span class="trace-detail-label">工具</span><span>${step.toolsUsed.join(', ')}</span></div>`);
+            if (step.summary) detailParts.push(`<div class="trace-detail-row"><span class="trace-detail-label">输出</span><span>${escapeHtml(step.summary)}</span></div>`);
+            if (step.artifacts.length > 0) detailParts.push(`<div class="trace-detail-row"><span class="trace-detail-label">产物</span><span>${step.artifacts.join(', ')}</span></div>`);
+            if (step.dependsOn.length > 0) detailParts.push(`<div class="trace-detail-row"><span class="trace-detail-label">依赖</span><span>${step.dependsOn.join(', ')}</span></div>`);
+            if (detailParts.length > 0) {
+                detailHtml = `<div class="trace-detail" id="detail-${step.id}">${detailParts.join('')}</div>`;
+            }
+
+            if (i > 0) {
+                html += '<div class="trace-arrow">↓</div>';
+            }
+
+            html += `
+                <div class="trace-step ${statusClass}" data-step-id="${step.id}">
+                    <div class="trace-icon">${icon}</div>
+                    <div class="trace-body">
+                        <div class="trace-header" onclick="toggleTraceDetail('${step.id}')">
+                            <span class="trace-agent-name">${label} (${step.agent})</span>
+                            <span class="trace-duration">${duration}</span>
+                        </div>
+                        ${objectiveHtml}
+                        ${toolsHtml}
+                        ${detailHtml}
+                    </div>
+                </div>`;
+        });
+        html += '</div>';
+
+        return html;
+    }
+
+    // 全局函数：展开/折叠 Agent 详情
+    window.toggleTraceDetail = function(stepId) {
+        const detail = document.getElementById('detail-' + stepId);
+        if (detail) {
+            detail.classList.toggle('open');
+        }
+    };
+
+    // --- 结果标签页 ---
+    function renderResultTabs(response) {
+        lastResponse = response;
+        const workspace = els.resultWorkspace;
+        const content = els.resultContent;
+
+        if (!response) {
+            workspace.style.display = 'none';
             return;
         }
-        container.innerHTML = messages.map(msg => {
-            let imagesHtml = '';
-            if (msg.imageUrls) {
-                try {
-                    const urls = JSON.parse(msg.imageUrls);
-                    if (Array.isArray(urls) && urls.length > 0) {
-                        imagesHtml = '<div class="qa-chart-container">' + urls.map(name => {
-                            // name 可能是 "charts/xxx.png" 或 "xxx.png"
-                            const path = name.startsWith('charts/') ? name : `charts/${name}`;
-                            return `<img src="/${path}" class="qa-chart-img" alt="图表" />`;
-                        }).join('') + '</div>';
-                    }
-                } catch {}
-            }
-            return `
-            <div class="qa-message-group" data-id="${msg.id}">
-                <div class="qa-group-controls">
-                    <button class="qa-delete-single" data-id="${msg.id}" title="删除此条记录">&times;</button>
-                </div>
-                <div class="qa-msg qa-question">
-                    <div class="qa-msg-label">问</div>
-                    <div class="qa-msg-content">${escapeHtml(msg.question)}</div>
-                    <div class="qa-msg-time">${formatTime(msg.createTime)}</div>
-                </div>
-                <div class="qa-msg qa-answer">
-                    <div class="qa-msg-label">答</div>
-                    <div class="qa-msg-content markdown-body">${renderMarkdown(msg.answer)}${imagesHtml}</div>
-                </div>
-            </div>
-            `;
-        }).join('');
-        container.scrollTop = container.scrollHeight;
+
+        workspace.style.display = '';
+
+        // 确定可用标签页
+        const tabs = [];
+        if (response.answer) tabs.push({ id: 'answer', label: '回答' });
+        if (response._traceHtml) tabs.push({ id: 'trace', label: '执行过程' });
+        if (response.image_urls && response.image_urls.length > 0) tabs.push({ id: 'charts', label: '图表' });
+        if (hasCodeResult(response)) tabs.push({ id: 'code', label: '代码' });
+        if (response.sources && response.sources.length > 0) tabs.push({ id: 'sources', label: '来源' });
+
+        if (tabs.length === 0) {
+            workspace.style.display = 'none';
+            return;
+        }
+
+        // 渲染标签栏
+        const tabsHtml = tabs.map((t, i) =>
+            `<button class="result-tab ${i === 0 ? 'active' : ''}" data-tab="${t.id}">${t.label}</button>`
+        ).join('');
+        els.resultTabs.innerHTML = tabsHtml;
+
+        // 绑定标签切换
+        els.resultTabs.querySelectorAll('.result-tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                els.resultTabs.querySelectorAll('.result-tab').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                renderTabContent(btn.dataset.tab, response);
+            });
+        });
+
+        // 渲染第一个标签
+        renderTabContent(tabs[0].id, response);
     }
+
+    function hasCodeResult(response) {
+        // 检查 plan 中是否有 code agent
+        if (response.plan) {
+            return response.plan.some(t => t.agent === 'code');
+        }
+        return false;
+    }
+
+    function renderTabContent(tabId, response) {
+        const content = els.resultContent;
+
+        switch (tabId) {
+            case 'answer':
+                content.innerHTML = `<div class="result-answer">${renderMarkdown(response.answer)}</div>`;
+                break;
+
+            case 'trace':
+                content.innerHTML = `<div class="result-trace">${response._traceHtml}</div>`;
+                break;
+
+            case 'charts':
+                const chartsHtml = response.image_urls.map((url, i) => {
+                    const src = url.startsWith('data:') ? url : (url.startsWith('charts/') ? `/${url}` : `/charts/${url}`);
+                    const isDataUrl = url.startsWith('data:');
+                    return `
+                        <div class="result-chart-card">
+                            <img src="${src}" alt="图表 ${i + 1}" />
+                            ${!isDataUrl ? `<div style="padding:8px 12px;text-align:right;"><a href="${src}" download style="font-size:12px;color:var(--primary);text-decoration:none;">下载</a></div>` : ''}
+                        </div>`;
+                }).join('');
+                content.innerHTML = `<div class="result-charts">${chartsHtml}</div>`;
+                break;
+
+            case 'code':
+                let codeHtml = '';
+
+                // 生成的 Python 代码
+                if (response.generated_code) {
+                    codeHtml += '<div style="margin-bottom:16px;">';
+                    codeHtml += '<div style="font-size:13px;font-weight:500;color:var(--gray-700);margin-bottom:8px;">📝 生成的 Python 代码</div>';
+                    codeHtml += `<div class="result-code"><code>${escapeHtml(response.generated_code)}</code></div>`;
+                    codeHtml += '</div>';
+                }
+
+                // 执行结果
+                if (response.code_stdout) {
+                    codeHtml += '<div style="margin-bottom:16px;">';
+                    codeHtml += '<div style="font-size:13px;font-weight:500;color:var(--gray-700);margin-bottom:8px;">📤 执行输出</div>';
+                    codeHtml += `<div class="result-code" style="background:var(--gray-900);"><code>${escapeHtml(response.code_stdout)}</code></div>`;
+                    codeHtml += '</div>';
+                }
+
+                // 错误信息
+                if (response.code_error) {
+                    codeHtml += '<div style="margin-bottom:16px;">';
+                    codeHtml += '<div style="font-size:13px;font-weight:500;color:#dc2626;margin-bottom:8px;">❌ 执行错误</div>';
+                    codeHtml += `<div class="result-code" style="background:#fef2f2;border:1px solid #fecaca;"><code style="color:#991b1b;">${escapeHtml(response.code_error)}</code></div>`;
+                    codeHtml += '</div>';
+                }
+
+                // 生成的图表
+                if (response.image_urls && response.image_urls.length > 0) {
+                    codeHtml += '<div style="margin-bottom:16px;">';
+                    codeHtml += '<div style="font-size:13px;font-weight:500;color:var(--gray-700);margin-bottom:8px;">📊 生成的图表</div>';
+                    codeHtml += '<div class="result-charts">' +
+                        response.image_urls.map(url => {
+                            const src = url.startsWith('data:') ? url : (url.startsWith('charts/') ? `/${url}` : `/charts/${url}`);
+                            return `<div class="result-chart-card"><img src="${src}" alt="图表" /></div>`;
+                        }).join('') + '</div>';
+                    codeHtml += '</div>';
+                }
+
+                // 无数据时
+                if (!codeHtml) {
+                    const codeTask = response.plan ? response.plan.find(t => t.agent === 'code') : null;
+                    if (codeTask && codeTask.summary) {
+                        codeHtml = `<div style="color:var(--gray-500);font-size:13px;">${escapeHtml(codeTask.summary)}</div>`;
+                    } else {
+                        codeHtml = '<div style="color:var(--gray-400);">无代码执行记录</div>';
+                    }
+                }
+
+                content.innerHTML = codeHtml;
+                break;
+
+            case 'sources':
+                const sourcesHtml = response.sources.map(s => `
+                    <div class="result-source-item">
+                        <div class="result-source-name">${escapeHtml(s.file_name)}${s.score ? ` (${(s.score * 100).toFixed(0)}%)` : ''}</div>
+                        <div class="result-source-content">${escapeHtml((s.content || '').substring(0, 200))}</div>
+                    </div>
+                `).join('');
+                content.innerHTML = `<div class="result-sources">${sourcesHtml}</div>`;
+                break;
+        }
+    }
+
+    // --- DAG 简图 ---
+    function renderDagGraph(plan, container) {
+        container = container || els.dagContent;
+        if (!plan || plan.length === 0) {
+            container.innerHTML = '<div class="dag-empty">执行任务后显示</div>';
+            return;
+        }
+
+        // 状态图例
+        let html = `
+            <div class="dag-legend">
+                <div class="dag-legend-item"><span class="dag-legend-dot completed"></span>完成</div>
+                <div class="dag-legend-item"><span class="dag-legend-dot failed"></span>失败</div>
+                <div class="dag-legend-item"><span class="dag-legend-dot running"></span>执行中</div>
+            </div>`;
+
+        // 拓扑排序分层
+        const levels = topologicalLevels(plan);
+        html += '<div class="dag-graph">';
+
+        // Planner 根节点
+        html += '<div class="dag-row"><div class="dag-node planner" data-step-id="planner">Planner</div></div>';
+
+        levels.forEach((level, li) => {
+            html += '<div class="dag-row">';
+            level.forEach(task => {
+                const icon = getAgentIcon(task.agent);
+                const label = getAgentLabel(task.agent);
+                const taskLabel = `${task.id} ${label}`;
+                const duration = task.duration_ms >= 1000
+                    ? (task.duration_ms / 1000).toFixed(1) + 's'
+                    : (task.duration_ms || '') + (task.duration_ms ? 'ms' : '');
+                const tooltip = [
+                    task.objective,
+                    task.summary,
+                    duration ? `耗时: ${duration}` : '',
+                    task.tools_used?.length ? `工具: ${task.tools_used.join(', ')}` : '',
+                ].filter(Boolean).join('\n');
+                html += `<div class="dag-node ${task.status}" data-step-id="${task.id}" onclick="highlightTraceStep('${task.id}')" title="${escapeHtml(tooltip)}"><span class="dag-node-icon">${icon}</span>${escapeHtml(taskLabel)}</div>`;
+            });
+            html += '</div>';
+        });
+
+        html += '</div>';
+        container.innerHTML = html;
+
+        // 渲染后绘制 SVG 箭头
+        requestAnimationFrame(() => drawDagArrows(container, plan, levels));
+    }
+
+    function drawDagArrows(container, plan, levels) {
+        const graph = container.querySelector('.dag-graph');
+        if (!graph) return;
+
+        // 移除旧 SVG
+        const oldSvg = graph.querySelector('svg.dag-arrows');
+        if (oldSvg) oldSvg.remove();
+
+        const graphRect = graph.getBoundingClientRect();
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.classList.add('dag-arrows');
+        svg.style.width = graph.scrollWidth + 'px';
+        svg.style.height = graph.scrollHeight + 'px';
+
+        // 箭头标记定义
+        const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+        const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+        marker.setAttribute('id', 'arrowhead');
+        marker.setAttribute('markerWidth', '8');
+        marker.setAttribute('markerHeight', '6');
+        marker.setAttribute('refX', '8');
+        marker.setAttribute('refY', '3');
+        marker.setAttribute('orient', 'auto');
+        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygon.setAttribute('points', '0 0, 8 3, 0 6');
+        polygon.setAttribute('fill', '#94a3b8');
+        marker.appendChild(polygon);
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+
+        // 收集所有节点位置
+        const nodePositions = {};
+        graph.querySelectorAll('.dag-node').forEach(node => {
+            const id = node.dataset.stepId;
+            const r = node.getBoundingClientRect();
+            nodePositions[id] = {
+                cx: r.left + r.width / 2 - graphRect.left + graph.scrollLeft,
+                top: r.top - graphRect.top + graph.scrollTop,
+                bottom: r.bottom - graphRect.top + graph.scrollTop,
+            };
+        });
+
+        // Planner → 第一层所有节点
+        if (nodePositions['planner'] && levels.length > 0) {
+            levels[0].forEach(task => {
+                if (nodePositions[task.id]) {
+                    drawArrow(svg, nodePositions['planner'].cx, nodePositions['planner'].bottom,
+                              nodePositions[task.id].cx, nodePositions[task.id].top);
+                }
+            });
+        }
+
+        // 各层之间按 depends_on 画箭头
+        const taskMap = {};
+        plan.forEach(t => { taskMap[t.id] = t; });
+
+        for (let li = 1; li < levels.length; li++) {
+            levels[li].forEach(task => {
+                if (!task.depends_on || !nodePositions[task.id]) return;
+                task.depends_on.forEach(depId => {
+                    if (nodePositions[depId]) {
+                        drawArrow(svg, nodePositions[depId].cx, nodePositions[depId].bottom,
+                                  nodePositions[task.id].cx, nodePositions[task.id].top);
+                    }
+                });
+            });
+        }
+
+        graph.appendChild(svg);
+    }
+
+    function drawArrow(svg, x1, y1, x2, y2) {
+        const midY = (y1 + y2) / 2;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', '#94a3b8');
+        path.setAttribute('stroke-width', '1.5');
+        path.setAttribute('marker-end', 'url(#arrowhead)');
+        svg.appendChild(path);
+    }
+
+    function topologicalLevels(plan) {
+        const taskMap = {};
+        plan.forEach(t => { taskMap[t.id] = t; });
+
+        const levels = [];
+        const placed = new Set();
+
+        // BFS 分层
+        let current = plan.filter(t => !t.depends_on || t.depends_on.length === 0);
+        while (current.length > 0) {
+            levels.push(current);
+            current.forEach(t => placed.add(t.id));
+            current = plan.filter(t =>
+                !placed.has(t.id) &&
+                t.depends_on.every(d => placed.has(d))
+            );
+        }
+
+        return levels;
+    }
+
+    // 全局函数：点击 DAG 节点高亮对应 Trace 步骤
+    window.highlightTraceStep = function(stepId) {
+        // 高亮 DAG 节点
+        document.querySelectorAll('.dag-node').forEach(n => n.classList.remove('highlight'));
+        const node = document.querySelector(`.dag-node[data-step-id="${stepId}"]`);
+        if (node) node.classList.add('highlight');
+
+        // 高亮 Trace 步骤
+        document.querySelectorAll('.trace-step').forEach(s => s.style.background = '');
+        const step = document.querySelector(`.trace-step[data-step-id="${stepId}"]`);
+        if (step) {
+            step.style.background = 'var(--primary-light)';
+            step.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    };
+
+    // --- 历史对话渲染：显示全部消息 + 可切换 Agent Trace/DAG ---
+    let _historyMessages = []; // 保存当前会话的所有消息，供 switchToRound 使用
+
+    function _parseJSON(val) {
+        if (!val) return null;
+        try { return typeof val === 'string' ? JSON.parse(val) : val; } catch { return null; }
+    }
+
+    function renderHistoricalMessages(messages) {
+        const container = els.agentTrace;
+        const workspace = els.resultWorkspace;
+
+        if (!messages || messages.length === 0) {
+            container.innerHTML = `
+                <div class="trace-empty">
+                    <div class="trace-empty-icon">💬</div>
+                    <div class="trace-empty-text">暂无问答记录，在下方输入问题开始分析</div>
+                </div>`;
+            workspace.style.display = 'none';
+            els.dagContent.innerHTML = '<div class="dag-empty">执行任务后显示</div>';
+            return;
+        }
+
+        _historyMessages = messages;
+
+        // 渲染所有消息为可点击的对话列表
+        let html = '<div class="chat-history">';
+        messages.forEach((msg, index) => {
+            const time = formatTime(msg.createTime);
+            const isLast = index === messages.length - 1;
+            html += `<div class="chat-msg user-msg">
+                <div class="chat-bubble user-bubble">
+                    <div class="chat-text">${escapeHtml(msg.question)}</div>
+                    <div class="chat-time">${time}</div>
+                </div>
+            </div>`;
+            html += `<div class="chat-msg ai-msg clickable ${isLast ? 'active' : ''}" data-round="${index}" onclick="switchToRound(${index})">
+                <div class="chat-bubble ai-bubble">
+                    <div class="chat-text">${escapeHtml(msg.answer || '（无回答）')}</div>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+        container.innerHTML = html;
+
+        // 默认显示最后一轮
+        _renderRound(messages.length - 1);
+    }
+
+    // 渲染指定轮次的 Agent Trace + DAG + 结果
+    function _renderRound(index) {
+        const msg = _historyMessages[index];
+        if (!msg) return;
+
+        const planData = _parseJSON(msg.plan);
+        const traceData = _parseJSON(msg.agentTrace);
+
+        // 生成 trace HTML（不再直接渲染到 DOM）
+        const traceHtml = (planData && planData.length > 0) ? renderAgentTrace(planData, traceData) : '';
+
+        // 渲染 DAG 到右侧栏
+        renderDagGraph(planData);
+
+        const imageUrls = _parseJSON(msg.imageUrls) || [];
+        const sources = _parseJSON(msg.sources) || [];
+        renderResultTabs({
+            answer: msg.answer,
+            image_urls: imageUrls,
+            sources: sources,
+            plan: planData,
+            _traceHtml: traceHtml,
+            generated_code: msg.generatedCode || '',
+            code_stdout: msg.codeStdout || '',
+            code_error: msg.codeError || '',
+            code_success: msg.codeSuccess !== false,
+        });
+    }
+
+    // 全局函数：点击切换到指定轮次
+    window.switchToRound = function(index) {
+        // 高亮选中
+        els.agentTrace.querySelectorAll('.chat-msg.ai-msg').forEach(el => el.classList.remove('active'));
+        const target = els.agentTrace.querySelector(`.chat-msg.ai-msg[data-round="${index}"]`);
+        if (target) target.classList.add('active');
+
+        // 切换显示
+        _renderRound(index);
+    };
+
+    // ============================================
+    // 问答 - API 调用
+    // ============================================
 
     async function loadQaHistory() {
         if (!state.currentSessionId) {
-            renderQaMessages([]);
+            renderHistoricalMessages([]);
             return;
         }
         try {
             const list = await Api.getQaHistory(state.currentSessionId);
-            renderQaMessages(list || []);
+            console.log('[loadQaHistory] sessionId=', state.currentSessionId, 'count=', list?.length, 'data=', list);
+            renderHistoricalMessages(list || []);
         } catch (err) {
             console.error('获取问答历史失败:', err);
         }
@@ -726,30 +1195,34 @@
             return;
         }
         if (!state.currentSessionId) {
-            showToast('请先新建一个对话', 'error');
+            showToast('请先新建一个任务', 'error');
             return;
         }
         if (qaLoading) return;
 
         els.qaInput.value = '';
 
-        const emptyEl = els.qaMessages.querySelector('.qa-empty');
-        if (emptyEl) emptyEl.remove();
-
-        const tempId = 'temp-' + Date.now();
-        els.qaMessages.insertAdjacentHTML('beforeend', `
-            <div class="qa-message-group" id="${tempId}">
-                <div class="qa-msg qa-question">
-                    <div class="qa-msg-label">问</div>
-                    <div class="qa-msg-content">${escapeHtml(question)}</div>
-                </div>
-                <div class="qa-msg qa-answer">
-                    <div class="qa-msg-label">答</div>
-                    <div class="qa-msg-content"><em>思考中...</em></div>
-                </div>
+        // 保留已有对话历史，在底部追加用户问题 + loading
+        const existingChat = els.agentTrace.querySelector('.chat-history');
+        const userBubble = `<div class="chat-msg user-msg">
+            <div class="chat-bubble user-bubble">
+                <div class="chat-text">${escapeHtml(question)}</div>
+                <div class="chat-time">刚刚</div>
             </div>
-        `);
-        els.qaMessages.scrollTop = els.qaMessages.scrollHeight;
+        </div>`;
+        const loadingBubble = `<div class="chat-msg ai-msg" id="loadingBubble">
+            <div class="chat-bubble ai-bubble loading-bubble">
+                <div class="chat-dots"><span></span><span></span><span></span></div>
+            </div>
+        </div>`;
+        if (existingChat) {
+            existingChat.insertAdjacentHTML('beforeend', userBubble + loadingBubble);
+            existingChat.scrollTop = existingChat.scrollHeight;
+        } else {
+            els.agentTrace.innerHTML = `<div class="chat-history">${userBubble}${loadingBubble}</div>`;
+        }
+        els.resultWorkspace.style.display = 'none';
+        els.dagContent.innerHTML = '<div class="dag-empty">规划中...</div>';
 
         try {
             qaLoading = true;
@@ -758,37 +1231,25 @@
             const strategyValues = [null, 'diversity', 'relevance'];
             const activeBtn = els.qaStrategyGroup.querySelector('.qa-strategy-btn.active');
             const strategy = strategyValues[parseInt(activeBtn.dataset.value)];
-            await Api.ask(question, state.currentSessionId, strategy);
-            // 重新加载历史列表 + 会话列表（标题可能已更新）
-            await Promise.all([
-                loadQaHistory(),
-                loadSessions(),
-            ]);
-        } catch (err) {
-            const temp = document.getElementById(tempId);
-            if (temp) temp.remove();
-            if (els.qaMessages.children.length === 0) {
-                els.qaMessages.innerHTML = '<div class="qa-empty">暂无问答记录，请在下方提问</div>';
+            const response = await Api.ask(question, state.currentSessionId, strategy);
+
+            // 重新加载完整对话历史（包含新消息 + Agent Trace/DAG 恢复）
+            await loadQaHistory();
+
+            // 更新会话标题
+            if (state.currentSessionId) {
+                const title = question.length > 30 ? question.substring(0, 30) + '...' : question;
+                const sessionItem = document.querySelector(`.session-item[data-id="${state.currentSessionId}"] .session-title`);
+                if (sessionItem) sessionItem.textContent = title;
             }
-            showToast(err.message || '提问失败', 'error');
+        } catch (err) {
+            // 移除 loading 气泡，显示错误
+            const loadingEl = document.getElementById('loadingBubble');
+            if (loadingEl) loadingEl.remove();
+            showToast(err.message || '执行失败', 'error');
         } finally {
             qaLoading = false;
             els.qaSendBtn.disabled = false;
-        }
-    }
-
-    // ============================================
-    // 问答记录单条删除
-    // ============================================
-
-    async function handleSingleDelete(id) {
-        if (!confirm('确定要删除此问答记录吗？')) return;
-        try {
-            await Api.deleteQaHistory(id);
-            showToast('删除成功', 'success');
-            loadQaHistory();
-        } catch (err) {
-            showToast(err.message || '删除失败', 'error');
         }
     }
 
@@ -1183,32 +1644,6 @@
             const item = e.target.closest('.qa-session-item');
             if (item) {
                 handleSwitchSession(item.dataset.sessionId);
-            }
-        });
-
-        // 删除当前会话
-        els.deleteSessionBtn.addEventListener('click', () => {
-            if (!state.currentSessionId) return;
-            const session = state.sessions.find(s => Number(s.id) === state.currentSessionId);
-            const title = session?.title || '新对话';
-            if (!confirm(`确定要删除对话"${title}"及其所有消息吗？`)) return;
-            (async () => {
-                try {
-                    await Api.deleteSession(state.currentSessionId);
-                    state.currentSessionId = null;
-                    await loadSessions();
-                    showToast('对话已删除', 'success');
-                } catch (err) {
-                    showToast(err.message || '删除失败', 'error');
-                }
-            })();
-        });
-
-        // 问答消息事件委托（单条删除）
-        els.qaMessages.addEventListener('click', (e) => {
-            const delBtn = e.target.closest('.qa-delete-single');
-            if (delBtn) {
-                handleSingleDelete(parseInt(delBtn.dataset.id));
             }
         });
 
