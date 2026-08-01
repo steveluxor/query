@@ -1,8 +1,8 @@
-# AgentFlow Runtime
+# Query — 智能知识问答系统
 
 > **LLM generates plans, Runtime guarantees execution.**
 >
-> 基于 Planner + DAG Workflow 的 Multi-Agent 自主任务执行系统
+> 基于 Planner + DAG Workflow 的 Multi-Agent 自主任务执行系统，SSE 双流实时推送
 
 ---
 
@@ -33,11 +33,11 @@
               └──────┬──────┘
                      │
               ┌──────┴──────┐
-              │  Generator  │  ← 多模态报告
+              │  Generator  │  ← SSE 逐 token 流式输出
               └──────┬──────┘
                      │
               ┌──────┴──────┐
-              │   Critic    │  ← 质量审核，不通过重跑子树
+              │   Critic    │  ← RuleValidator + LLM 两级审核
               └─────────────┘
 ```
 
@@ -50,8 +50,8 @@
 | Extractor | 8.4s | 42 个知识对象 |
 | CodeAgent | 5.1s | 趋势图 PNG |
 | Generator | 2.0s | 分析报告 |
-| Critic | 1.5s | 评分 9.2，通过 |
-| **总计** | **~20.7s** | 完整多模态分析报告 |
+| Critic | <2s | RuleValidator 通过 + LLM 评分 9.2 |
+| **总计** | **~21s** | 完整多模态分析报告 |
 
 ---
 
@@ -64,7 +64,7 @@
 | 流程 | 固定：检索 → 生成 | 动态：Planner 生成 DAG |
 | 执行 | 单 Agent 线性调用 | 多 Agent 并行 + 依赖调度 |
 | 能力 | 检索 + 文本生成 | 检索 + 抽取 + 计算 + 代码执行 + 图表 |
-| 质量 | 无审核机制 | Critic 评分 + 局部重试 |
+| 质量 | 无审核机制 | 两级 Critic + 局部重试 |
 | 扩展 | 改代码 | 注册 Agent + 写 prompt |
 
 **传统 RAG 是 Retriever-centric，本系统是 Planner-centric。**
@@ -74,8 +74,6 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
 ---
 
 ## 系统架构
-
-**LLM 负责生成执行计划，Runtime 负责保证计划可靠执行。**
 
 ```
                       User Goal
@@ -93,7 +91,7 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
                    └─────┬─────┘
                          │
                    ┌─────┴─────┐
-                   │ Extractor │  ← Map-Reduce 知识抽取
+                   │ Extractor │  ← Map-Reduce 知识抽取（精简输出）
                    └─────┬─────┘
                          │
               ┌──────────┴──────────┐
@@ -105,11 +103,11 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
               └──────────┬──────────┘
                          │
                    ┌─────┴─────┐
-                   │ Generator │  ← 多模态报告
+                   │ Generator │  ← SSE 逐 token 流式输出
                    └─────┬─────┘
                          │
                    ┌─────┴─────┐
-                   │  Critic   │  ← 闭环质量控制
+                   │  Critic   │  ← RuleValidator(<100ms) + LLM(5-15s)
                    └───────────┘
 ```
 
@@ -118,7 +116,7 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
 | **Planning Layer** | 理解用户意图，生成任务 DAG |
 | **Runtime Layer** | DAG 调度、并行执行、数据流注入 |
 | **Capability Layer** | 检索、分析、代码执行等能力 |
-| **Presentation Layer** | 前端 Agent Workspace |
+| **Presentation Layer** | SSE 双流推送 + 前端实时渲染 |
 
 ---
 
@@ -128,7 +126,7 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
 
 Orchestrator 不感知 Agent 内部逻辑，只根据 Capability（输入输出 Schema）自动完成调度。Agent 是声明式能力节点，新增 Agent 无需修改 Orchestrator。
 
-### 2. DAG Runtime 职责分离
+### 2. DAG Runtime 六层校验
 
 **LLM 决定"做什么"，Runtime 保证"怎么执行"。** LLM 输出不可直接执行，经六层校验 + 后处理兜底修正：
 
@@ -136,23 +134,41 @@ Orchestrator 不感知 Agent 内部逻辑，只根据 Capability（输入输出 
 Planner Output → Schema Validation → Capability Validation → Graph Repair → Execution
 ```
 
-Graph Repair 包括：自动补齐 port_binding、删除非法 dependency、修复 output conflict。
-
 ### 3. port_bindings 数据流
 
 通过声明式数据通道替代 Agent 间隐式共享状态，task 间通过 port_bindings 自动注入数据。
 
-### 4. Closed-loop Agent Control
+### 4. 两级 Critic 闭环控制
 
-Critic 不只是评分，而是 Controller：评估答案质量 → 生成 ControlAction(retry/continue/abort) → 指定重跑子图，形成 Plan → Execute → Evaluate → Correct 闭环。
+```
+Answer → RuleValidator (确定性, <100ms) → 通过?
+                                          ↓ 不通过 → 直接重试
+                                Slim LLM Critic (5-15s, 矛盾检测)
+```
 
-### 5. CodeAgent 沙箱
+RuleValidator 做空 answer + 数值一致性检查（支持 95/95%/0.95 normalize），LLM Critic 做语义矛盾检测。
 
-通过进程隔离、资源限制（512MB + 60s）和模块白名单降低 LLM 生成代码执行风险。图片 base64 编码传回。
+### 5. SSE 双流架构
 
-### 6. MCP 工具协议
+```
+POST /qa/ask → {run_id}
+GET /qa/runtime/{run_id}  → Agent 进度事件（低频）
+GET /qa/answer/{run_id}   → token 增量流（高频，逐字渲染）
+```
 
-MCP 提供标准化 Tool Interface，使 Runtime 与具体工具实现解耦。工程上支持工具独立部署、多语言实现、生命周期独立管理。
+RuntimeEventBus per-run pub-sub，前端同时接收 Workflow 层状态和 Generation 层 token。
+
+### 6. CodeAgent 沙箱
+
+进程隔离 + 资源限制（512MB + 60s）+ 模块白名单，降低 LLM 生成代码执行风险。图片 base64 编码传回。
+
+### 7. MCP 工具协议
+
+标准化 Tool Interface 解耦 Runtime 与工具实现。支持工具独立部署、多语言实现。
+
+### 8. LLM 推理管线优化
+
+Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字）→ Generator/Critic prompt 自动瘦身 → Token Metrics 全链路追踪。
 
 ---
 
@@ -160,14 +176,15 @@ MCP 提供标准化 Tool Interface，使 Runtime 与具体工具实现解耦。�
 
 | 指标 | 数值 |
 |------|------|
-| Python 代码 | ~4000 行 |
+| Python 代码 | ~4500 行 |
 | TaskGraph Engine | 1 套 |
 | 领域 Agent | 7 个 |
 | MCP 工具 | 6 个 |
 | DAG 校验层 | 6 层 |
 | Docker 服务 | 8 个 |
 | 数据库 | MySQL + Redis + ChromaDB |
-| API 端点 | 12 个 |
+| SSE 端点 | 2 个 |
+| API 端点 | 13 个 |
 
 ---
 
@@ -202,8 +219,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | 缓存 | Redis |
 | 关系数据库 | MySQL (Spring Boot + MyBatis) |
 | 工具协议 | MCP (Model Context Protocol) |
+| 实时推送 | SSE (Server-Sent Events) + RuntimeEventBus |
 | 文档存储 | MinIO |
-| 前端 | 原生 HTML/CSS/JavaScript + SVG DAG |
+| 前端 | 原生 HTML/CSS/JavaScript + EventSource |
 | 容器化 | Docker Compose |
 
 ---
@@ -211,8 +229,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ## 后续优化
 
 1. **动态 Replanning**：根据执行中间结果动态调整任务图
-2. **流式任务状态**：SSE 实时推送 Agent 执行进度
-3. **Agent 插件化**：热插拔 Agent 注册，支持自定义扩展
+2. **Agent 插件化**：热插拔 Agent 注册，支持自定义扩展
 
 ---
 
@@ -222,12 +239,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 简历项目描述
 
-**AgentFlow Runtime —— Planner + DAG Multi-Agent Execution Framework**
+**Query —— Planner + DAG Multi-Agent Execution Framework**
 
-设计并实现 LLM 驱动的 Agent Workflow Runtime，将用户目标转换为 DAG TaskGraph，并通过 Runtime 完成多 Agent 编排、并行执行和闭环质量控制。
+设计并实现 LLM 驱动的 Agent Workflow Runtime，将用户目标转换为 DAG TaskGraph，通过 Runtime 完成多 Agent 编排、并行执行和闭环质量控制。
 
 - 设计声明式 Agent Capability Contract，通过输入输出 Schema 实现 Agent 解耦，支持 Agent 动态注册与能力扩展
-- 实现 DAG Scheduler，支持拓扑排序、异步并行执行、port binding 数据流注入以及子图级失败恢复
+- 实现 DAG Scheduler，支持拓扑排序、异步并行执行、port_bindings 数据流注入以及子图级失败恢复
 - 构建 MCP Tool Runtime，通过标准化 Tool Interface 解耦 Agent 与 RAG、数据分析、代码执行等外部能力
+- 实现两级 Critic 闭环：RuleValidator（确定性规则，<100ms）+ Slim LLM Critic（语义矛盾检测，5-15s），支持精准子图重执行
+- 设计 SSE 双流架构：RuntimeEventBus per-run pub-sub，前端实时接收 Agent 进度和 token 增量流
 - 实现 CodeAgent Sandbox，通过进程隔离、资源限制和模块白名单降低 LLM 生成代码执行风险
-- 设计 Critic Controller，实现基于 ControlAction 的闭环评估与精准子图重执行
+- 优化 LLM 推理管线：Extractor 输出精简（attributes 短语化 + evidence 核心断言），Generator token budget，Critic slim prompt，全链路 Token Metrics

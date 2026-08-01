@@ -70,7 +70,8 @@ class AnswerGenerator(BaseAgent):
                     await context.emit(EventType.TOKEN_CHUNK, {"text": chunk.content})
             answer = "".join(full_answer)
             context.set_output("answer", answer, producer="generator")
-            logger.info("[Generator] 生成回答完成，长度 %d", len(answer))
+            logger.info("[Generator] 生成回答完成，prompt=%d字, answer=%d字",
+                        len(prompt), len(answer))
         except Exception as e:
             logger.warning("[Generator] LLM 生成失败: %s", e)
             context.set_output("answer", self._fallback_answer(context, evidences), producer="generator")
@@ -86,48 +87,42 @@ class AnswerGenerator(BaseAgent):
         ))
 
     def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_result=None, source_meta=None, structured_knowledge=None, code_result=None) -> str:
-        """构建 Generator prompt — 只包含 question/evidence/analysis/sources"""
+        """构建 Generator prompt — 精简版，减少 token 消耗"""
         parts = [PromptManager.get("generator", "system"), ""]
 
         # 用户问题
         parts.append(f"用户问题：{context.question}")
 
-        # 知识对象（结构化摘要）
+        # 知识对象（紧凑格式，token budget 截断 list 值）
         if structured_knowledge:
             ko_lines = []
-            for i, ko in enumerate(structured_knowledge, 1):
-                attrs_str = "; ".join(
-                    f"{k}={', '.join(str(x) for x in v) if isinstance(v, list) else v}"
-                    for k, v in ko.attributes.items()
-                )
-                ko_lines.append(f"  {i}. [{ko.source}] {ko.topic}: {attrs_str}")
-            parts.append(f"\n知识对象：\n" + "\n".join(ko_lines))
+            for i, ko in enumerate(structured_knowledge[:20], 1):
+                attrs = []
+                for k, v in ko.attributes.items():
+                    if isinstance(v, list):
+                        val = self._truncate_list(v, max_items=3, max_tokens=80)
+                    else:
+                        val = str(v)[:80]
+                    attrs.append(f"{k}={val}")
+                ko_lines.append(f"  {i}. [{ko.source}] {ko.topic}: {'; '.join(attrs)}")
+            parts.append(f"\n知识对象（{len(structured_knowledge)}条）：\n" + "\n".join(ko_lines))
 
-        # 证据（原始细节，与知识对象互补）
+        # 证据（Extractor 已精简，全量传入）
         if evidence_list:
-            evidence_lines = []
-            for i, ev in enumerate(evidence_list, 1):
-                evidence_lines.append(
-                    f"  {i}. [{ev.source}] {ev.statement} (type={ev.evidence_type})"
-                )
-            parts.append(f"\n证据：\n" + "\n".join(evidence_lines))
+            evidence_lines = [f"  {i}. [{ev.source}] {ev.statement}"
+                             for i, ev in enumerate(evidence_list, 1)]
+            parts.append(f"\n证据（{len(evidence_list)}条）：\n" + "\n".join(evidence_lines))
         else:
             parts.append("\n证据：无")
 
-        # 分析结果
+        # 分析结果（只传 calculations + conclusions，跳过 findings）
         if analysis_result:
-            a = analysis_result
-            if a.calculations:
-                calc_lines = []
-                for c in a.calculations:
-                    calc_lines.append(f"  - {c.operation}({c.field}): {c.result} (from {c.source})")
+            if analysis_result.calculations:
+                calc_lines = [f"  - {c.operation}({c.field})={c.result}"
+                             for c in analysis_result.calculations]
                 parts.append(f"\n计算结果：\n" + "\n".join(calc_lines))
-            if a.findings:
-                parts.append(f"\n发现：\n" + "\n".join(f"  - {f}" for f in a.findings))
-            if a.conclusions:
-                parts.append(f"\n结论：\n" + "\n".join(f"  - {c}" for c in a.conclusions))
-        else:
-            parts.append("\n分析结果：无")
+            if analysis_result.conclusions:
+                parts.append(f"\n结论：\n" + "\n".join(f"  - {c}" for c in analysis_result.conclusions))
 
         # 代码执行结果
         if code_result and code_result.success:
@@ -148,6 +143,24 @@ class AnswerGenerator(BaseAgent):
 
         parts.append("\n请基于以上信息组织最终回答。")
         return "\n".join(parts)
+
+    @staticmethod
+    def _truncate_list(items: list, max_items: int = 3, max_tokens: int = 80) -> str:
+        """token budget 截断：短字段取前 N 个，长字段按 token 截断"""
+        result = []
+        total = 0
+        for item in items:
+            s = str(item)
+            if len(result) >= max_items:
+                break
+            if total + len(s) > max_tokens and result:
+                break
+            result.append(s)
+            total += len(s)
+        text = ", ".join(result)
+        if len(items) > len(result):
+            text += f" 等{len(items)}项"
+        return text
 
     def _fallback_answer(self, context: AgentContext, evidence_list=None) -> str:
         """LLM 失败时的降级回答"""

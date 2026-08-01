@@ -209,42 +209,32 @@ generator:
 
 # ===== Critic Agent =====
 critic:
-  evaluate: |
-    你是一个答案质量评估员。根据证据和分析结果，判断回答是否准确、完整。
+  slim_evaluate: |
+    你是一个答案质量评估员。审核以下回答。
 
     用户问题：{question}
-
-    证据：
-    {evidence}
-
-    分析结果：
-    {analysis}
-
-    生成回答：{answer}
-
-    检索完整性报告：
-    {retrieval_report}
+    回答：{answer}
+    关键证据：{evidence}
+    分析结果：{analysis}
 
     评估标准：
-    - 准确性：回答是否与证据矛盾，有无明显编造（注意：evidence 只是文档的摘要，generator 可能从原文中提取了更多细节，只要不与证据矛盾即可）
+    - 准确性：回答是否与证据矛盾（不是检查每个claim是否有evidence支撑）
     - 完整性：是否回答了用户的问题
-    - **证据覆盖度**：evidence 是否覆盖了回答所需的主要方面。如果 retrieval_report 显示 is_complete=false
-      （数据不完整），但问题需要全面数据，说明证据不足，需要重新检索
-    - 来源引用：是否标注了主要结论的来源
-    - 逻辑一致性：回答是否与分析结果矛盾
+    - 逻辑一致性：回答是否自洽
 
-    注意：不要因为 evidence 中缺少某个细节就判定为编造，只要回答与已有证据不矛盾且合理即可通过。
+    注意：
+    - 不要因为 evidence 中缺少某个细节就判定为编造，只要回答与已有证据不矛盾且合理即可通过
+    - evidence 只是文档摘要，generator 可能从原文中提取了更多细节
 
     返回 JSON：
     - {{"score": 8, "problems": [], "need_retry": false, "retry_target": "all"}} — 答案合格
-    - {{"score": 4, "problems": ["缺少来源引用"], "need_retry": true, "retry_target": "generator"}} — 需要修改
-    - {{"score": 3, "problems": ["证据覆盖度不足"], "need_retry": true, "retry_target": "retrieval"}} — 需要重新检索
+    - {{"score": 4, "problems": ["问题描述"], "need_retry": true, "retry_target": "generator"}} — 需要修改
+    - {{"score": 3, "problems": ["证据不足"], "need_retry": true, "retry_target": "retrieval"}} — 需要重新检索
 
     retry_target 取值：
-    - "retrieval": 检索阶段有问题，需要重新搜索文档
-    - "analysis": 计算/分析有问题，需要重新分析
-    - "generator": 表达有问题，只需要重新生成回答
-    - "all": 严重问题，需要全部重来
+    - "retrieval": 检索阶段有问题
+    - "generator": 表达有问题，只需重新生成
+    - "all": 严重问题，全部重来
 
     只返回 JSON，不要解释。
 

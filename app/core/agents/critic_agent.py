@@ -3,6 +3,7 @@ import logging
 
 from app.config import settings
 from app.core.agents.base_agent import ControllerAgent
+from app.core.agents.rule_validator import RuleValidator
 from app.core.agent_context import AgentContext
 from app.core.prompts.prompt_manager import PromptManager
 from app.models.data_types import CriticResult, AgentTrace, AnalysisResult, RetrievalReport
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class CriticAgent(ControllerAgent):
-    """Critic Agent：审核答案质量，输出 CriticResult，返回 ControlAction"""
+    """Critic Agent：两级审核 — RuleValidator（确定性）+ Slim LLM Critic（语义）"""
 
     name = "Critic"
     capability = AgentCapability(
@@ -43,6 +44,7 @@ class CriticAgent(ControllerAgent):
     def __init__(self):
         from app.core.infra.llm_factory import create_llm
         self.llm = create_llm(temperature=0)
+        self.rule_validator = RuleValidator()
 
     def parse_actions(self, context: AgentContext) -> list[ControlAction]:
         need_retry = context.get_output("need_retry", False)
@@ -58,18 +60,36 @@ class CriticAgent(ControllerAgent):
         evidences = kwargs.get("evidence_list", [])
         analysis = kwargs.get("analysis_result")
         answer = kwargs.get("generated_answer", "")
-        report = kwargs.get("retrieval_report")
 
-        prompt = self._build_prompt(
-            context=context,
-            evidence_list=evidences,
-            analysis_result=analysis,
-            generated_answer=answer,
-            retrieval_report=report,
+        # ===== 1. RuleValidator 纯确定性检查（<100ms）=====
+        rule_result = self.rule_validator.check(answer=answer, analysis=analysis)
+        if not rule_result.passed:
+            logger.info("[Critic] RuleValidator 拦截: %s", rule_result.problems)
+            context.set_output("critique",
+                json.dumps(rule_result.problems, ensure_ascii=False), producer="critic")
+            context.set_output("need_retry", True, producer="critic")
+            context.set_output("retry_target", "generator", producer="critic")
+            duration = int((time.time() - start) * 1000)
+            context.add_trace(AgentTrace(
+                agent="Critic", start_time=str(int(start * 1000)),
+                end_time=str(int(time.time() * 1000)),
+                tools_called=[], input_summary="rule_check_only",
+                output_summary=f"rule_blocked, problems={len(rule_result.problems)}",
+            ))
+            return context
+
+        # ===== 2. LLM Critic 精审（slim prompt，evidence 全量传入）=====
+        prompt = self._build_slim_prompt(
+            context=context, evidence_list=evidences,
+            analysis_result=analysis, generated_answer=answer,
         )
-
         try:
             result = await self.llm.ainvoke([("human", prompt)])
+            # Token metrics
+            if hasattr(result, 'response_metadata') and 'token_usage' in result.response_metadata:
+                usage = result.response_metadata['token_usage']
+                logger.info("[Critic] tokens: input=%d, output=%d",
+                            usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
             critic_result = self._parse_result(result.content)
         except Exception as e:
             logger.warning("[Critic] LLM 调用失败: %s", e)
@@ -100,59 +120,35 @@ class CriticAgent(ControllerAgent):
 
         return context
 
-    def _build_prompt(self, context: AgentContext, evidence_list=None, analysis_result=None, generated_answer="", retrieval_report=None) -> str:
-
-        # 格式化 evidence
+    def _build_slim_prompt(self, context: AgentContext, evidence_list=None,
+                           analysis_result=None, generated_answer="") -> str:
+        """构建 slim Critic prompt — evidence 全量传入（Extractor 已精简）"""
+        # evidence 全量（Extractor 精简后每条 50-80 字）
         if evidence_list:
             evidence_text = "\n".join(
-                f"  - [{ev.source}] {ev.statement}" for ev in evidence_list
+                f"  - [{ev.source}] {ev.statement}"
+                for ev in evidence_list
             )
         else:
             evidence_text = "  无"
 
-        # 格式化 analysis
-        if analysis_result:
-            parts = []
-            if analysis_result.calculations:
-                parts.append("计算：" + ", ".join(
-                    f"{c.operation}({c.field})={c.result}" for c in analysis_result.calculations
-                ))
-            if analysis_result.findings:
-                parts.append("发现：" + "; ".join(analysis_result.findings))
-            analysis_text = "  " + "\n  ".join(parts) if parts else "  无"
+        # analysis 只传核心
+        if analysis_result and analysis_result.calculations:
+            calc_text = ", ".join(
+                f"{c.operation}({c.field})={c.result}"
+                for c in analysis_result.calculations
+            )
+            analysis_text = f"  计算: {calc_text}"
+            if analysis_result.conclusions:
+                analysis_text += "\n  结论: " + "; ".join(analysis_result.conclusions[:3])
         else:
             analysis_text = "  无"
 
-        # 格式化任务计划
-        if context.plan and context.plan.tasks:
-            task_lines = []
-            for t in context.plan.tasks:
-                deps = f" (依赖: {', '.join(t.depends_on)})" if t.depends_on else ""
-                task_lines.append(f"  - [{t.id}] {t.agent}: {t.objective}{deps}")
-            task_plan = f"目标: {context.plan.goal}\n" + "\n".join(task_lines)
-        else:
-            task_plan = "  无（简单模式）"
-
-        # 格式化检索完整性报告
-        if retrieval_report:
-            report_text = (
-                f"  sources: {retrieval_report.sources}\n"
-                f"  total_chunks: {retrieval_report.total_chunks}\n"
-                f"  returned_chunks: {retrieval_report.returned_chunks}\n"
-                f"  is_complete: {retrieval_report.is_complete}\n"
-                f"  read_all_rows_called: {retrieval_report.read_all_rows_called}\n"
-                f"  searches_performed: {retrieval_report.searches_performed}"
-            )
-        else:
-            report_text = "  无"
-
-        return PromptManager.get("critic", "evaluate").format(
+        return PromptManager.get("critic", "slim_evaluate").format(
             question=context.question,
+            answer=generated_answer,
             evidence=evidence_text,
             analysis=analysis_text,
-            answer=generated_answer,
-            retrieval_report=report_text,
-            task_plan=task_plan,
         )
 
     def _parse_result(self, text: str) -> CriticResult:
