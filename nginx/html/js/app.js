@@ -1,5 +1,5 @@
 /**
- * RAG 知识管理系统 - 前端应用逻辑
+ * 智能知识问答系统 - 前端应用逻辑
  */
 (() => {
     'use strict';
@@ -15,6 +15,12 @@
         currentSessionId: null,
         sessions: [],
         reuploadDocId: null,
+        _creatingSession: false,
+        sessionHasMessages: false,
+        pendingSession: null,
+        _pendingUserBubble: null,
+        _pendingLoadingBubble: null,
+        _awaitingFirstResponse: false,
     };
 
     // ============================================
@@ -531,7 +537,17 @@
         els.qaView.style.display = '';
         els.qaTabBtn.classList.add('active-tab');
         els.docTabBtn.classList.remove('active-tab');
-        loadSessions();
+        if (!state.currentSessionId) {
+            loadSessions();
+        } else {
+            renderSessionList();
+            updateQaHeader();
+            // 尝试恢复 SSE 状态，如果没有才加载历史
+            if (_restoreSseState(state.currentSessionId)) return;
+            if (!state.pendingSession && !state._awaitingFirstResponse) {
+                loadQaHistory();
+            }
+        }
     }
 
     // ============================================
@@ -540,14 +556,19 @@
 
     function renderSessionList() {
         const container = els.sessionList;
-        if (!state.sessions || state.sessions.length === 0) {
+        const all = [...state.sessions];
+        if (state.pendingSession) {
+            all.unshift(state.pendingSession);
+        }
+        if (all.length === 0) {
             container.innerHTML = '<div class="session-empty">暂无任务</div>';
             return;
         }
 
-        container.innerHTML = state.sessions.map(s => {
+        const sorted = all.sort((a, b) => (b.id || 0) - (a.id || 0));
+        container.innerHTML = sorted.map(s => {
             const title = s.title || '新任务';
-            const isActive = Number(s.id) === state.currentSessionId;
+            const isActive = s.id === state.currentSessionId;
             return `
                 <div class="qa-session-item ${isActive ? 'active' : ''}" data-session-id="${s.id}">
                     <span class="session-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
@@ -609,41 +630,77 @@
     }
 
     async function handleNewSession() {
-        if (!state.userId) return;
+        if (!state.userId || state._creatingSession) return;
+        state._creatingSession = true;
         try {
-            const session = await Api.createSession();
-            state.currentSessionId = session.id;
-            // 重新加载会话列表
-            await loadSessions();
-            // 清空消息区
+            const pending = { id: 'pending-1', title: '新任务', _pending: true };
+            state.pendingSession = pending;
+            state.currentSessionId = pending.id;
+            state.sessionHasMessages = false;
+            renderSessionList();
+            updateQaHeader();
             renderHistoricalMessages([]);
             els.qaInput.focus();
-            showToast('已创建新对话', 'success');
-        } catch (err) {
-            showToast(err.message || '创建对话失败', 'error');
+            showToast('已创建新对话（发送消息后保存）', 'success');
+        } finally {
+            state._creatingSession = false;
+            els.newSessionBtn.disabled = true;
         }
     }
 
     async function handleSwitchSession(sessionId) {
         sessionId = Number(sessionId);
         if (!sessionId || sessionId === state.currentSessionId) return;
+
+        // 保存当前会话的 SSE 状态（如果有的话）
+        if (_activeRuntimeSSE) {
+            _saveSseState(state.currentSessionId);
+        }
+
+        if (state.pendingSession) {
+            state.pendingSession = null;
+            state._pendingUserBubble = null;
+            state._pendingLoadingBubble = null;
+        }
+
         state.currentSessionId = sessionId;
         renderSessionList();
         updateQaHeader();
-        loadQaHistory();
+
+        // 尝试恢复目标会话的 SSE 状态
+        if (!_restoreSseState(sessionId)) {
+            loadQaHistory();
+        }
     }
 
     async function handleDeleteSession(btn) {
         const rawId = btn.dataset.sessionId;
+        if (!rawId) return;
+
+        // 删除 pending session（仅本地）
+        if (state.pendingSession && state.pendingSession.id === rawId) {
+            const title = state.pendingSession.title || '新对话';
+            if (!confirm(`确定要丢弃对话"${title}"吗？`)) return;
+            state.pendingSession = null;
+            state._pendingUserBubble = null;
+            state._pendingLoadingBubble = null;
+            state.currentSessionId = null;
+            renderSessionList();
+            updateQaHeader();
+            renderHistoricalMessages([]);
+            showToast('对话已丢弃', 'success');
+            return;
+        }
+
+        // 删除持久化 session
         const sessionId = Number(rawId);
-        if (!sessionId || isNaN(sessionId)) return;
+        if (isNaN(sessionId)) return;
         const session = state.sessions.find(s => Number(s.id) === sessionId);
         const title = session?.title || '新对话';
         if (!confirm(`确定要删除对话"${title}"及其所有消息吗？`)) return;
 
         try {
             await Api.deleteSession(sessionId);
-            // 如果删除的是当前会话，清除选中
             if (state.currentSessionId === sessionId) {
                 state.currentSessionId = null;
             }
@@ -1126,6 +1183,15 @@
         html += '</div>';
         container.innerHTML = html;
 
+        // 如果有进行中的消息（用户气泡 + loading），追加到末尾
+        if (state._pendingUserBubble && state._pendingLoadingBubble) {
+            const chatDiv = container.querySelector('.chat-history');
+            if (chatDiv) {
+                chatDiv.insertAdjacentHTML('beforeend', state._pendingUserBubble + state._pendingLoadingBubble);
+                chatDiv.scrollTop = chatDiv.scrollHeight;
+            }
+        }
+
         // 默认显示最后一轮
         _renderRound(messages.length - 1);
     }
@@ -1177,15 +1243,49 @@
     async function loadQaHistory() {
         if (!state.currentSessionId) {
             renderHistoricalMessages([]);
+            state.sessionHasMessages = false;
+            els.newSessionBtn.disabled = true;
             return;
         }
         try {
             const list = await Api.getQaHistory(state.currentSessionId);
-            console.log('[loadQaHistory] sessionId=', state.currentSessionId, 'count=', list?.length, 'data=', list);
-            renderHistoricalMessages(list || []);
+            const msgs = list || [];
+            state.sessionHasMessages = msgs.length > 0;
+            els.newSessionBtn.disabled = !state.sessionHasMessages;
+            renderHistoricalMessages(msgs);
         } catch (err) {
             console.error('获取问答历史失败:', err);
         }
+    }
+
+    // ==================== SSE 流式状态 ====================
+    let _activeRuntimeSSE = null;  // 当前活跃的 Runtime SSE 连接
+    let _activeAnswerSSE = null;   // 当前活跃的 Answer SSE 连接
+    let _streamingTraceSteps = []; // 流式 Agent Trace 步骤
+    let _streamingAnswer = '';     // 流式回答缓冲区
+    const _sseSessionStates = {}; // 按 sessionId 保存 SSE 状态（切换会话时暂存）
+
+    function _saveSseState(sessionId) {
+        if (!_activeRuntimeSSE) return;
+        // 关闭 SSE 连接（避免后台事件污染全局状态）
+        // Python 后台任务继续执行，callback 仍会持久化结果
+        if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
+        if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
+        _sseSessionStates[sessionId] = { pending: true };
+        _streamingTraceSteps = [];
+        _streamingAnswer = '';
+        state._pendingUserBubble = null;
+        state._pendingLoadingBubble = null;
+        state._awaitingFirstResponse = false;
+    }
+
+    function _restoreSseState(sessionId) {
+        const saved = _sseSessionStates[sessionId];
+        if (!saved) return false;
+        delete _sseSessionStates[sessionId];
+        // 切回时直接加载历史（后台任务可能已完成或仍在运行）
+        loadQaHistory();
+        return true;
     }
 
     async function handleSendQuestion() {
@@ -1202,6 +1302,10 @@
 
         els.qaInput.value = '';
 
+        // 关闭可能残留的 SSE 连接
+        if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
+        if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
+
         // 保留已有对话历史，在底部追加用户问题 + loading
         const existingChat = els.agentTrace.querySelector('.chat-history');
         const userBubble = `<div class="chat-msg user-msg">
@@ -1215,6 +1319,9 @@
                 <div class="chat-dots"><span></span><span></span><span></span></div>
             </div>
         </div>`;
+        // 保存进行中的消息，供切页后恢复
+        state._pendingUserBubble = userBubble;
+        state._pendingLoadingBubble = loadingBubble;
         if (existingChat) {
             existingChat.insertAdjacentHTML('beforeend', userBubble + loadingBubble);
             existingChat.scrollTop = existingChat.scrollHeight;
@@ -1227,30 +1334,418 @@
         try {
             qaLoading = true;
             els.qaSendBtn.disabled = true;
+            _streamingTraceSteps = [];
 
             const strategyValues = [null, 'diversity', 'relevance'];
             const activeBtn = els.qaStrategyGroup.querySelector('.qa-strategy-btn.active');
             const strategy = strategyValues[parseInt(activeBtn.dataset.value)];
-            const response = await Api.ask(question, state.currentSessionId, strategy);
 
-            // 重新加载完整对话历史（包含新消息 + Agent Trace/DAG 恢复）
-            await loadQaHistory();
-
-            // 更新会话标题
-            if (state.currentSessionId) {
-                const title = question.length > 30 ? question.substring(0, 30) + '...' : question;
-                const sessionItem = document.querySelector(`.session-item[data-id="${state.currentSessionId}"] .session-title`);
-                if (sessionItem) sessionItem.textContent = title;
+            // 如果是 pending session，先真正创建
+            let wasPending = false;
+            if (state.pendingSession && state.currentSessionId === state.pendingSession.id) {
+                wasPending = true;
+                const created = await Api.createSession();
+                state.currentSessionId = created.id;
+                state.pendingSession = null;
+                state._awaitingFirstResponse = true;
             }
+
+            // Phase 1: POST 获取 run_id（Python 异步执行）
+            const askResult = await Api.ask(question, state.currentSessionId, strategy);
+            const runId = askResult.run_id;
+
+            // Phase 2: 连接 SSE 流
+            await _connectRuntimeSSE(runId, wasPending);
+
         } catch (err) {
             // 移除 loading 气泡，显示错误
             const loadingEl = document.getElementById('loadingBubble');
             if (loadingEl) loadingEl.remove();
+            state._awaitingFirstResponse = false;
+            if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
             showToast(err.message || '执行失败', 'error');
         } finally {
             qaLoading = false;
             els.qaSendBtn.disabled = false;
         }
+    }
+
+    function _connectRuntimeSSE(runId, wasPending) {
+        return new Promise((resolve, reject) => {
+            const token = Api.getToken();
+            const url = `/qa/runtime/${runId}${token ? '?token=' + encodeURIComponent(token) : ''}`;
+            console.log('[SSE] Connecting runtime:', url);
+            const source = new EventSource(url);
+            _activeRuntimeSSE = source;
+
+            // 超时保护：300 秒（含 Critic 重试的复杂任务可能需要较长时间）
+            const timeout = setTimeout(() => {
+                console.warn('[SSE] Runtime timeout');
+                source.close();
+                _activeRuntimeSSE = null;
+                if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
+                const loadingEl = document.getElementById('loadingBubble');
+                if (loadingEl) loadingEl.remove();
+                showToast('响应超时，请刷新页面查看结果', 'warning');
+                reject(new Error('SSE timeout'));
+            }, 300000);
+
+            source.onopen = () => console.log('[SSE] Runtime connected');
+
+            // 同时连接 Answer SSE（token 流式输出）
+            _connectAnswerSSE(runId);
+
+            source.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                const { type, data } = msg;
+                console.log('[SSE] Runtime event:', type);
+
+                switch (type) {
+                    case 'runtime_started':
+                        const dagEmpty = els.dagContent.querySelector('.dag-empty');
+                        if (dagEmpty) dagEmpty.textContent = 'Runtime 启动...';
+                        break;
+
+                    case 'plan_generated':
+                        _renderStreamingDag(data.tasks);
+                        _updateLoadingBubble('任务规划完成，开始执行...');
+                        break;
+
+                    case 'agent_started':
+                        _onAgentStarted(data);
+                        break;
+
+                    case 'agent_completed':
+                        _onAgentCompleted(data);
+                        break;
+
+                    case 'agent_failed':
+                        _onAgentFailed(data);
+                        break;
+
+                    case 'control_action':
+                        _onControlAction(data);
+                        break;
+
+                    case 'runtime_completed':
+                        clearTimeout(timeout);
+                        _onRuntimeCompleted(data, wasPending);
+                        source.close();
+                        _activeRuntimeSSE = null;
+                        resolve();
+                        break;
+
+                    case 'runtime_error':
+                        clearTimeout(timeout);
+                        source.close();
+                        _activeRuntimeSSE = null;
+                        const loadingEl = document.getElementById('loadingBubble');
+                        if (loadingEl) loadingEl.remove();
+                        showToast('执行失败: ' + (data.error || '未知错误'), 'error');
+                        reject(new Error(data.error));
+                        break;
+                }
+            };
+
+            source.onerror = (e) => {
+                console.error('[SSE] Runtime error, readyState:', source.readyState);
+                clearTimeout(timeout);
+                if (source.readyState === EventSource.CLOSED) return;
+                source.close();
+                _activeRuntimeSSE = null;
+                const loadingEl = document.getElementById('loadingBubble');
+                if (loadingEl) loadingEl.remove();
+                showToast('SSE 连接断开', 'error');
+                reject(new Error('SSE connection failed'));
+            };
+        });
+    }
+
+    // ==================== SSE 事件处理 ====================
+
+    function _updateLoadingBubble(text) {
+        const loadingEl = document.getElementById('loadingBubble');
+        if (loadingEl) {
+            const dots = loadingEl.querySelector('.chat-dots');
+            if (dots) dots.innerHTML = `<span style="font-size:12px;color:var(--gray-500);">${escapeHtml(text)}</span>`;
+        }
+    }
+
+    function _renderStreamingDag(tasks) {
+        // 将 plan tasks 转为 pending 状态的 DAG
+        const plan = tasks.map(t => ({
+            ...t,
+            status: 'pending',
+            duration_ms: 0,
+        }));
+        renderDagGraph(plan);
+    }
+
+    function _onAgentStarted(data) {
+        const { task_id, agent, objective } = data;
+
+        // 更新 DAG 节点状态为 running
+        updateDagNodeStatus(task_id, 'running');
+
+        // 更新 loading 气泡
+        const label = getAgentLabel(agent);
+        _updateLoadingBubble(`${label} 正在执行...`);
+
+        // 追加 Agent Trace 步骤（running 状态）
+        _streamingTraceSteps.push({
+            id: task_id,
+            agent: agent,
+            objective: objective,
+            status: 'running',
+            startTime: Date.now(),
+            durationMs: 0,
+            summary: '',
+            toolsUsed: [],
+        });
+        _renderStreamingTrace();
+    }
+
+    function _onAgentCompleted(data) {
+        const { task_id, agent, duration_ms, summary, tools_used } = data;
+
+        // 更新 DAG 节点状态为 completed
+        updateDagNodeStatus(task_id, 'completed');
+
+        // 更新 Trace 步骤
+        const step = _streamingTraceSteps.find(s => s.id === task_id);
+        if (step) {
+            step.status = 'completed';
+            step.durationMs = duration_ms;
+            step.summary = summary;
+            step.toolsUsed = tools_used || [];
+        }
+        _renderStreamingTrace();
+    }
+
+    function _onAgentFailed(data) {
+        const { task_id, agent, duration_ms, error } = data;
+
+        updateDagNodeStatus(task_id, 'failed');
+
+        const step = _streamingTraceSteps.find(s => s.id === task_id);
+        if (step) {
+            step.status = 'failed';
+            step.durationMs = duration_ms;
+            step.summary = '失败: ' + error;
+        }
+        _renderStreamingTrace();
+    }
+
+    function _onControlAction(data) {
+        const { task_id, agent, action, target_task_id } = data;
+
+        // 在 Trace 中追加控制动作记录
+        const label = getAgentLabel(agent);
+        const actionLabel = action === 'retry' ? `重试 ${target_task_id}` : action;
+        _updateLoadingBubble(`${label}: ${actionLabel}`);
+
+        // 如果是 retry，将目标 task 状态重置为 pending
+        if (action === 'retry' && target_task_id) {
+            updateDagNodeStatus(target_task_id, 'retrying');
+            const step = _streamingTraceSteps.find(s => s.id === target_task_id);
+            if (step) {
+                step.status = 'retrying';
+                step.summary = '重试中...';
+            }
+            _renderStreamingTrace();
+        }
+    }
+
+    async function _onRuntimeCompleted(data, wasPending) {
+        // 关闭 Answer SSE（如果还开着）
+        if (_activeAnswerSSE) {
+            _activeAnswerSSE.close();
+            _activeAnswerSSE = null;
+        }
+
+        // 移除 loading 气泡
+        const loadingEl = document.getElementById('loadingBubble');
+        if (loadingEl) loadingEl.remove();
+        state._pendingUserBubble = null;
+        state._pendingLoadingBubble = null;
+        state._awaitingFirstResponse = false;
+
+        // 用 runtime_completed 事件中的数据直接渲染结果（不依赖 DB 持久化）
+        const planData = data.plan || null;
+        const traceHtml = planData ? renderAgentTrace(planData, data.agent_trace || []) : '';
+
+        // 如果有流式回答，用它；否则用 data.answer
+        const answer = _streamingAnswer || data.answer || '';
+
+        // 渲染回答区（替换流式光标为最终版本）
+        if (answer) {
+            const chatHistory = els.agentTrace.querySelector('.chat-history');
+            const answerContainer = chatHistory?.querySelector('.answer-stream');
+            if (answerContainer) {
+                answerContainer.innerHTML = `
+                    <div class="chat-bubble ai-bubble">
+                        <div class="chat-text">${renderMarkdown(answer)}</div>
+                    </div>`;
+            }
+        }
+
+        // 渲染 DAG（最终状态）
+        if (planData) {
+            renderDagGraph(planData);
+        }
+
+        // 渲染结果 tabs（sources、code、charts）
+        const imageUrls = data.image_urls || [];
+        const sources = (data.sources || []).map(s =>
+            typeof s === 'string' ? JSON.parse(s) : s
+        );
+        renderResultTabs({
+            answer: answer,
+            image_urls: imageUrls,
+            sources: sources,
+            plan: planData,
+            _traceHtml: traceHtml,
+            generated_code: data.generated_code || '',
+            code_stdout: data.code_stdout || '',
+            code_error: data.code_error || '',
+            code_success: data.code_success !== false,
+        });
+
+        // 重新加载对话历史（异步，不影响当前渲染）
+        loadQaHistory().catch(() => {});
+
+        // pending → 真实 session 后，刷新会话列表
+        if (wasPending) {
+            await loadSessions();
+        }
+    }
+
+    // ==================== Answer Token Streaming ====================
+
+    function _connectAnswerSSE(runId) {
+        _streamingAnswer = '';
+        const token = Api.getToken();
+        const url = `/qa/answer/${runId}${token ? '?token=' + encodeURIComponent(token) : ''}`;
+        console.log('[SSE] Connecting answer:', url);
+        const source = new EventSource(url);
+        _activeAnswerSSE = source;
+
+        source.onopen = () => console.log('[SSE] Answer connected');
+
+        source.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            if (data.type === 'done') {
+                console.log('[SSE] Answer done');
+                source.close();
+                _activeAnswerSSE = null;
+                return;
+            }
+            // token chunk
+            _streamingAnswer += data.text;
+            _renderStreamingAnswer(_streamingAnswer);
+        };
+
+        source.onerror = (e) => {
+            console.error('[SSE] Answer error, readyState:', source.readyState);
+            if (source.readyState === EventSource.CLOSED) return;
+            source.close();
+            _activeAnswerSSE = null;
+        };
+    }
+
+    function _renderStreamingAnswer(text) {
+        // 在 loading 气泡位置渲染流式回答
+        const chatHistory = els.agentTrace.querySelector('.chat-history');
+        if (!chatHistory) return;
+
+        // 查找或创建 answer-stream 容器
+        let answerContainer = chatHistory.querySelector('.answer-stream');
+        if (!answerContainer) {
+            answerContainer = document.createElement('div');
+            answerContainer.className = 'chat-msg ai-msg answer-stream';
+            // 插入到 streaming-trace 之后
+            const traceContainer = chatHistory.querySelector('.streaming-trace');
+            if (traceContainer) {
+                traceContainer.insertAdjacentHTML('afterend', '');
+                traceContainer.parentNode.insertBefore(answerContainer, traceContainer.nextSibling);
+            } else {
+                chatHistory.appendChild(answerContainer);
+            }
+        }
+
+        answerContainer.innerHTML = `
+            <div class="chat-bubble ai-bubble">
+                <div class="chat-text answer-streaming">${renderMarkdown(text)}</div>
+            </div>`;
+
+        // 滚动到底部
+        chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    // ==================== DAG 实时状态更新 ====================
+
+    function updateDagNodeStatus(taskId, status) {
+        const node = document.querySelector(`.dag-node[data-step-id="${taskId}"]`);
+        if (!node) return;
+        // 移除旧状态 class
+        node.classList.remove('pending', 'running', 'completed', 'failed', 'retrying');
+        node.classList.add(status);
+    }
+
+    // ==================== 流式 Agent Trace 渲染 ====================
+
+    function _renderStreamingTrace() {
+        const container = els.agentTrace;
+        const chatHistory = container.querySelector('.chat-history');
+        if (!chatHistory) return;
+
+        // 查找或创建 streaming-trace 容器
+        let traceContainer = chatHistory.querySelector('.streaming-trace');
+        if (!traceContainer) {
+            traceContainer = document.createElement('div');
+            traceContainer.className = 'streaming-trace';
+            // 插入到 loading 气泡之前
+            const loadingBubble = document.getElementById('loadingBubble');
+            if (loadingBubble) {
+                chatHistory.insertBefore(traceContainer, loadingBubble);
+            } else {
+                chatHistory.appendChild(traceContainer);
+            }
+        }
+
+        let html = '<div class="trace-steps">';
+        _streamingTraceSteps.forEach((step, i) => {
+            const icon = getAgentIcon(step.agent);
+            const label = getAgentLabel(step.agent);
+            const statusClass = step.status;
+            const duration = step.durationMs >= 1000
+                ? (step.durationMs / 1000).toFixed(1) + 's'
+                : step.durationMs > 0 ? step.durationMs + 'ms' : '';
+
+            let statusIcon = '';
+            if (step.status === 'running') statusIcon = '<span class="trace-spinner"></span>';
+            else if (step.status === 'completed') statusIcon = '✓';
+            else if (step.status === 'failed') statusIcon = '✗';
+            else if (step.status === 'retrying') statusIcon = '↻';
+
+            if (i > 0) html += '<div class="trace-arrow">↓</div>';
+
+            html += `
+                <div class="trace-step ${statusClass}" data-step-id="${step.id}">
+                    <div class="trace-icon">${icon}</div>
+                    <div class="trace-body">
+                        <div class="trace-header">
+                            <span class="trace-agent-name">${label} (${step.agent})</span>
+                            <span class="trace-status">${statusIcon}</span>
+                            ${duration ? `<span class="trace-duration">${duration}</span>` : ''}
+                        </div>
+                        ${step.objective ? `<div class="trace-objective">${escapeHtml(step.objective)}</div>` : ''}
+                        ${step.summary ? `<div class="trace-summary">${escapeHtml(step.summary)}</div>` : ''}
+                    </div>
+                </div>`;
+        });
+        html += '</div>';
+        traceContainer.innerHTML = html;
     }
 
     // ============================================

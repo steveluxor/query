@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
 import steveluxor.ragknowledgesystem.common.Result;
 import steveluxor.ragknowledgesystem.dto.AskRequest;
@@ -27,7 +28,9 @@ import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -37,6 +40,7 @@ import org.springframework.util.DigestUtils;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.concurrent.CompletableFuture;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -87,35 +91,216 @@ public class QaServiceImpl implements QaService {
                 .build();
     }
 
+    // ==================== SSE 透传 ====================
+
+    @Override
+    public SseEmitter streamRuntime(String runId) {
+        return proxySse(pythonBaseUrl + "/qa/runtime/" + runId, "runtime", runId);
+    }
+
+    @Override
+    public SseEmitter streamAnswer(String runId) {
+        return proxySse(pythonBaseUrl + "/qa/answer/" + runId, "answer", runId);
+    }
+
+    /**
+     * 通用 SSE 透传：连接 Python SSE 端点，逐行转发给前端
+     */
+    private SseEmitter proxySse(String pythonUrl, String streamType, String runId) {
+        SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                HttpRequest httpReq = HttpRequest.newBuilder()
+                        .uri(URI.create(pythonUrl))
+                        .header("Accept", "text/event-stream")
+                        .timeout(Duration.ofSeconds(300))
+                        .GET()
+                        .build();
+
+                // 使用 ofInputStream + BufferedReader 实现逐行流式转发
+                // BodyHandlers.ofLines() 会缓冲整个响应体，不适合 SSE
+                HttpResponse<java.io.InputStream> response = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofInputStream());
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("data: ")) {
+                            String data = line.substring(6);
+                            try {
+                                emitter.send(SseEmitter.event()
+                                        .name("message")
+                                        .data(data));
+                            } catch (Exception e) {
+                                log.warn("[SSE-{}] 转发失败: {}", streamType, e.getMessage());
+                                break;
+                            }
+                        }
+                    }
+                }
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("[SSE-{}] Python 连接失败: runId={}, error={}", streamType, runId, e.getMessage());
+                try {
+                    emitter.completeWithError(e);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+
+        emitter.onTimeout(() -> log.warn("[SSE-{}] 超时: runId={}", streamType, runId));
+        emitter.onError(t -> log.warn("[SSE-{}] 错误: runId={}, error={}", streamType, runId, t.getMessage()));
+
+        return emitter;
+    }
+
+    // ==================== Python Callback 持久化 ====================
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Result handleCallback(Map<String, Object> body) {
+        try {
+            Long sessionId = body.get("session_id") != null
+                    ? Long.valueOf(String.valueOf(body.get("session_id"))) : null;
+            Map<String, Object> result = (Map<String, Object>) body.get("result");
+            if (result == null) {
+                return Result.fail("callback body 缺少 result");
+            }
+
+            // 从 session 查 userId
+            if (sessionId == null) {
+                return Result.fail("callback body 缺少 session_id");
+            }
+            QaSession session = qaSessionMapper.selectById(sessionId);
+            if (session == null) {
+                return Result.fail("session 不存在: " + sessionId);
+            }
+            Long userId = session.getUserId();
+
+            String answer = (String) result.getOrDefault("answer", "");
+            Object sources = result.getOrDefault("sources", List.of());
+            String sourcesJson = objectMapper.writeValueAsString(sources);
+            Boolean isAgg = (Boolean) result.getOrDefault("is_agg", false);
+            Object plan = result.get("plan");
+            Object agentTrace = result.get("agent_trace");
+            String generatedCode = (String) result.getOrDefault("generated_code", "");
+            String codeStdout = (String) result.getOrDefault("code_stdout", "");
+            String codeError = (String) result.getOrDefault("code_error", "");
+            Boolean codeSuccess = (Boolean) result.getOrDefault("code_success", true);
+            String question = (String) result.getOrDefault("question", "");
+
+            // 1. 写入 AgentMemory 快照到 Redis
+            Object memoryData = result.get("memory_data");
+            if (memoryData != null) {
+                String memoryJson = objectMapper.writeValueAsString(memoryData);
+                String memoryKey = QA_MEMORY_PREFIX + sessionId;
+                redisTemplate.opsForValue().set(memoryKey, memoryJson, QA_MEMORY_TTL_SECONDS, TimeUnit.SECONDS);
+                log.info("[Callback] AgentMemory 写入 Redis: sessionId={}", sessionId);
+
+                // preferences 变化写入数据库
+                try {
+                    Map<String, Object> memMap = (Map<String, Object>) memoryData;
+                    Object prefDirtyObj = memMap.get("preferences_dirty");
+                    boolean prefDirty = prefDirtyObj instanceof Boolean
+                            ? (Boolean) prefDirtyObj
+                            : prefDirtyObj instanceof Number
+                            ? ((Number) prefDirtyObj).intValue() != 0
+                            : Boolean.parseBoolean(String.valueOf(prefDirtyObj));
+                    if (prefDirty) {
+                        Object prefs = memMap.get("preferences");
+                        if (prefs != null) {
+                            qaSessionMapper.updatePreferences(sessionId, objectMapper.writeValueAsString(prefs));
+                            log.info("[Callback] preferences 写入数据库: sessionId={}", sessionId);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("[Callback] memory_data 结构异常，跳过 preferences: {}", e.getMessage());
+                }
+            }
+
+            // 2. 写入对话历史到 Redis
+            Map<String, Object> historyItem = new HashMap<>();
+            historyItem.put("question", question);
+            historyItem.put("answer", answer);
+            historyItem.put("is_agg", isAgg);
+            String historyKey = QA_HISTORY_PREFIX + sessionId;
+            redisTemplate.opsForList().rightPush(historyKey, objectMapper.writeValueAsString(historyItem));
+            redisTemplate.expire(historyKey, QA_MEMORY_TTL_SECONDS, TimeUnit.SECONDS);
+
+            // 3. 上传 base64 图片到 MinIO
+            String imageUrlsJson = null;
+            Object imageUrlsObj = result.get("image_urls");
+            if (imageUrlsObj instanceof List<?> imageList && !imageList.isEmpty()) {
+                List<String> minioObjectNames = new ArrayList<>();
+                for (Object item : imageList) {
+                    if (item instanceof String base64Str && !base64Str.isEmpty()) {
+                        try {
+                            byte[] imageBytes = Base64.getDecoder().decode(base64Str);
+                            String objectName = "charts/" + UUID.randomUUID() + ".png";
+                            minioClient.putObject(PutObjectArgs.builder()
+                                    .bucket(bucketName)
+                                    .object(objectName)
+                                    .stream(new ByteArrayInputStream(imageBytes), imageBytes.length, -1)
+                                    .contentType("image/png")
+                                    .build());
+                            minioObjectNames.add(objectName);
+                        } catch (Exception e) {
+                            log.warn("[Callback] 图片上传 MinIO 失败: {}", e.getMessage());
+                        }
+                    }
+                }
+                if (!minioObjectNames.isEmpty()) {
+                    imageUrlsJson = objectMapper.writeValueAsString(minioObjectNames);
+                }
+            }
+
+            // 4. 保存 QaHistory 到 MySQL
+            String planJson = plan != null ? objectMapper.writeValueAsString(plan) : null;
+            String agentTraceJson = agentTrace != null ? objectMapper.writeValueAsString(agentTrace) : null;
+
+            QaHistory history = QaHistory.builder()
+                    .userId(userId)
+                    .sessionId(sessionId)
+                    .question(question)
+                    .answer(answer)
+                    .sources(sourcesJson)
+                    .isAgg(isAgg)
+                    .imageUrls(imageUrlsJson)
+                    .plan(planJson)
+                    .agentTrace(agentTraceJson)
+                    .generatedCode(generatedCode != null && !generatedCode.isEmpty() ? generatedCode : null)
+                    .codeStdout(codeStdout != null && !codeStdout.isEmpty() ? codeStdout : null)
+                    .codeError(codeError != null && !codeError.isEmpty() ? codeError : null)
+                    .codeSuccess(codeSuccess)
+                    .createUser(userId)
+                    .build();
+            qaHistoryMapper.insert(history);
+
+            // 5. 写入 Redis 会话历史缓存
+            String sessionHistoryKey = QA_SESSION_HISTORY_PREFIX + sessionId;
+            String historyFullJson = objectMapper.writeValueAsString(history);
+            redisTemplate.opsForList().rightPush(sessionHistoryKey, historyFullJson);
+            redisTemplate.expire(sessionHistoryKey, QA_SESSION_HISTORY_TTL_SECONDS, TimeUnit.SECONDS);
+
+            // 6. 更新会话标题
+            if (question != null && !question.isEmpty()) {
+                String title = question.length() > TITLE_MAX_LENGTH
+                        ? question.substring(0, TITLE_MAX_LENGTH) + "..." : question;
+                qaSessionMapper.updateTitle(sessionId, title);
+            }
+
+            log.info("[Callback] 持久化完成: sessionId={}, userId={}", sessionId, userId);
+            return Result.ok();
+        } catch (Exception e) {
+            log.error("[Callback] 持久化失败", e);
+            return Result.fail("持久化失败: " + e.getMessage());
+        }
+    }
+
     @Override
     public Result ask(AskRequest request) {
         Long userId = CurrentUser.get();
         try {
-            // 1. 生成缓存 Key（拼入上一个问题，确保不同上下文下同一问题有独立缓存）
-            String normalized = request.getQuestion()
-                    .replaceAll("[？?！!。，,\\s]", "");
-            String sessionIdPart = request.getSessionId() != null ? String.valueOf(request.getSessionId()) : "none";
-            // 获取上一个问题作为 cache key 的一部分
-            String prevQuestionHash = "none";
-            if (request.getSessionId() != null) {
-                List<QaHistory> recentHistory = qaHistoryMapper.selectBySessionId(request.getSessionId(), userId);
-                if (!recentHistory.isEmpty()) {
-                    String lastQuestion = recentHistory.get(recentHistory.size() - 1).getQuestion();
-                    String lastNormalized = lastQuestion.replaceAll("[？?！!。，,\\s]", "");
-                    prevQuestionHash = DigestUtils.md5DigestAsHex(lastNormalized.getBytes(StandardCharsets.UTF_8));
-                }
-            }
-            String cacheKey = QA_CACHE_PREFIX + userId + ":" + sessionIdPart + ":" + prevQuestionHash + ":" + DigestUtils.md5DigestAsHex(normalized.getBytes(StandardCharsets.UTF_8));
-
-            // 2. 尝试从 Redis 获取缓存
-            String cachedJson = redisTemplate.opsForValue().get(cacheKey);
-            if (cachedJson != null) {
-                log.info("问答缓存命中: userId={}, question={}", userId, request.getQuestion());
-                QaHistory cachedHistory = objectMapper.readValue(cachedJson, QaHistory.class);
-                return Result.ok(cachedHistory);
-            }
-
-            // 3. 缓存未命中，调用 Python AI 服务
+            // 1. 构建 Python 请求（document_ids, session_id, history, preferences）
             List<Document> accessibleDocs = documentMapper.selectByUserId(userId);
             List<Integer> accessibleDocIds = accessibleDocs.stream()
                     .map(doc -> doc.getId().intValue())
@@ -130,16 +315,15 @@ public class QaServiceImpl implements QaService {
                 pythonReq.put("strategy", request.getStrategy());
             }
 
-            // 持久化记忆 V5：session_id + 全量历史（Redis 无记忆时由 Python 重建）
             if (request.getSessionId() != null) {
                 String sessionIdStr = String.valueOf(request.getSessionId());
                 pythonReq.put("session_id", sessionIdStr);
 
+                // Redis 无记忆时发送全量历史供 Python 重建 AgentMemory
                 String memoryKey = QA_MEMORY_PREFIX + sessionIdStr;
                 Boolean memoryExists = redisTemplate.hasKey(memoryKey);
 
                 if (!Boolean.TRUE.equals(memoryExists)) {
-                    // Redis 无记忆快照，发送全量历史供 Python 重建 AgentMemory
                     QaSession session = qaSessionMapper.selectById(request.getSessionId());
                     if (session != null && session.getPreferences() != null) {
                         pythonReq.put("preferences", objectMapper.readValue(session.getPreferences(), Map.class));
@@ -158,17 +342,17 @@ public class QaServiceImpl implements QaService {
                         pythonReq.put("history", historyList);
                         log.info("Redis 无记忆，发送全量历史: sessionId={}, count={}", sessionIdStr, historyList.size());
                     }
-                } else {
-                    log.info("Redis 存在记忆: sessionId={}，Python 从 Redis 加载", sessionIdStr);
                 }
             }
+
             String jsonBody = objectMapper.writeValueAsString(pythonReq);
             log.info("发送到 Python: body={}", jsonBody);
 
+            // 2. 调用 Python /qa/ask — 立即返回 {run_id, session_id}
             HttpRequest httpReq = HttpRequest.newBuilder()
                     .uri(URI.create(pythonBaseUrl + ASK_PATH))
                     .header("Content-Type", "application/json; charset=utf-8")
-                    .timeout(TIMEOUT)
+                    .timeout(Duration.ofSeconds(30))
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
                     .build();
 
@@ -180,158 +364,18 @@ public class QaServiceImpl implements QaService {
                 throw new BizException(AI_SERVICE_ERROR_PREFIX + errorBody);
             }
 
+            // 3. 透传 run_id + session_id 给前端，持久化由 Python callback 完成
             Map<String, Object> pythonResp = objectMapper.readValue(httpResp.body(), Map.class);
-            String answer = (String) pythonResp.getOrDefault("answer", "");
-            Object sources = pythonResp.getOrDefault("sources", List.of());
-            String sourcesJson = objectMapper.writeValueAsString(sources);
-            Boolean isAgg = (Boolean) pythonResp.getOrDefault("is_agg", false);
+            String runId = (String) pythonResp.get("run_id");
+            Object sessionId = pythonResp.get("session_id");
 
-            // 透传 Agent Runtime 元数据给前端（plan, agent_trace, code 等）
-            Object plan = pythonResp.get("plan");
-            Object agentTrace = pythonResp.get("agent_trace");
-            String generatedCode = (String) pythonResp.getOrDefault("generated_code", "");
-            String codeStdout = (String) pythonResp.getOrDefault("code_stdout", "");
-            String codeError = (String) pythonResp.getOrDefault("code_error", "");
-            Boolean codeSuccess = (Boolean) pythonResp.getOrDefault("code_success", true);
+            log.info("问答已提交: userId={}, runId={}, sessionId={}", userId, runId, sessionId);
 
-            // 4. 持久化记忆 V5：写入 Redis（Python AgentMemory + 对话历史，3天 TTL）
-            if (request.getSessionId() != null) {
-                String sessionIdStr = String.valueOf(request.getSessionId());
-
-                // 4a. 写入 AgentMemory 快照
-                Object memoryData = pythonResp.get("memory_data");
-                if (memoryData != null) {
-                    String memoryJson = objectMapper.writeValueAsString(memoryData);
-                    String memoryKey = QA_MEMORY_PREFIX + sessionIdStr;
-                    redisTemplate.opsForValue().set(memoryKey, memoryJson, QA_MEMORY_TTL_SECONDS, TimeUnit.SECONDS);
-                    log.info("AgentMemory 写入 Redis: sessionId={}", sessionIdStr);
-
-                    // 4a-1. preferences 有变化时写入数据库
-                    try {
-                        Map<String, Object> memMap = (Map<String, Object>) memoryData;
-                        Object prefDirtyObj = memMap.get("preferences_dirty");
-                        // 兼容 Boolean / Integer / String 等类型
-                        boolean prefDirty = prefDirtyObj instanceof Boolean
-                                ? (Boolean) prefDirtyObj
-                                : prefDirtyObj instanceof Number
-                                ? ((Number) prefDirtyObj).intValue() != 0
-                                : Boolean.parseBoolean(String.valueOf(prefDirtyObj));
-                        if (prefDirty) {
-                            Object prefs = memMap.get("preferences");
-                            if (prefs != null) {
-                                String prefsJson = objectMapper.writeValueAsString(prefs);
-                                qaSessionMapper.updatePreferences(request.getSessionId(), prefsJson);
-                                log.info("preferences 写入数据库: sessionId={}", sessionIdStr);
-                            }
-                        }
-                    } catch (Exception e) {
-                        log.warn("memory_data 结构异常，跳过 preferences 写库: {}", e.getMessage());
-                    }
-                }
-
-                // 4b. 写入对话历史缓存（RPUSH，Python 用 lrange key -N -1 读取最新 N 条）
-                Map<String, Object> historyItem = new HashMap<>();
-                historyItem.put("question", request.getQuestion());
-                historyItem.put("answer", answer);
-                historyItem.put("is_agg", isAgg);
-                String historyItemJson = objectMapper.writeValueAsString(historyItem);
-                String historyKey = QA_HISTORY_PREFIX + sessionIdStr;
-                redisTemplate.opsForList().rightPush(historyKey, historyItemJson);
-                redisTemplate.expire(historyKey, QA_MEMORY_TTL_SECONDS, TimeUnit.SECONDS);
-                log.info("对话历史写入 Redis: sessionId={}", sessionIdStr);
-            }
-
-            // 4c. 提取 base64 图片，上传 MinIO
-            String imageUrlsJson = null;
-            Object imageUrlsObj = pythonResp.get("image_urls");
-            if (imageUrlsObj instanceof List<?> imageList && !imageList.isEmpty()) {
-                List<String> minioObjectNames = new ArrayList<>();
-                for (Object item : imageList) {
-                    if (item instanceof String base64Str && !base64Str.isEmpty()) {
-                        try {
-                            byte[] imageBytes = Base64.getDecoder().decode(base64Str);
-                            String objectName = "charts/" + UUID.randomUUID() + ".png";
-                            minioClient.putObject(PutObjectArgs.builder()
-                                    .bucket(bucketName)
-                                    .object(objectName)
-                                    .stream(new ByteArrayInputStream(imageBytes), imageBytes.length, -1)
-                                    .contentType("image/png")
-                                    .build());
-                            minioObjectNames.add(objectName);
-                            log.info("图表上传 MinIO: {}", objectName);
-                        } catch (Exception e) {
-                            log.warn("图表上传 MinIO 失败: {}", e.getMessage());
-                        }
-                    }
-                }
-                if (!minioObjectNames.isEmpty()) {
-                    imageUrlsJson = objectMapper.writeValueAsString(minioObjectNames);
-                }
-            }
-
-            // 5. 保存问答历史
-            String planJson = plan != null ? objectMapper.writeValueAsString(plan) : null;
-            String agentTraceJson = agentTrace != null ? objectMapper.writeValueAsString(agentTrace) : null;
-
-            QaHistory history = QaHistory.builder()
-                    .userId(userId)
-                    .sessionId(request.getSessionId())
-                    .question(request.getQuestion())
-                    .answer(answer)
-                    .sources(sourcesJson)
-                    .isAgg(isAgg)
-                    .imageUrls(imageUrlsJson)
-                    .plan(planJson)
-                    .agentTrace(agentTraceJson)
-                    .generatedCode(generatedCode != null && !generatedCode.isEmpty() ? generatedCode : null)
-                    .codeStdout(codeStdout != null && !codeStdout.isEmpty() ? codeStdout : null)
-                    .codeError(codeError != null && !codeError.isEmpty() ? codeError : null)
-                    .codeSuccess(codeSuccess)
-                    .createUser(userId)
-                    .build();
-            qaHistoryMapper.insert(history);
-
-            // 5a. 写入 Redis 会话历史缓存（完整记录，前端加载用）
-            if (request.getSessionId() != null) {
-                String sessionHistoryKey = QA_SESSION_HISTORY_PREFIX + request.getSessionId();
-                String historyFullJson = objectMapper.writeValueAsString(history);
-                redisTemplate.opsForList().rightPush(sessionHistoryKey, historyFullJson);
-                redisTemplate.expire(sessionHistoryKey, QA_SESSION_HISTORY_TTL_SECONDS, TimeUnit.SECONDS);
-            }
-
-            // 6. 写入 Redis 缓存（TTL 30 分钟）
-            String historyJson = objectMapper.writeValueAsString(history);
-            redisTemplate.opsForValue().set(cacheKey, historyJson, QA_CACHE_TTL, TimeUnit.MINUTES);
-            log.info("问答缓存写入: userId={}, key={}", userId, cacheKey);
-
-            // 7. 首次提问时自动设置会话标题
-            if (request.getSessionId() != null) {
-                String title = request.getQuestion();
-                if (title.length() > TITLE_MAX_LENGTH) {
-                    title = title.substring(0, TITLE_MAX_LENGTH) + "...";
-                }
-                qaSessionMapper.updateTitle(request.getSessionId(), title);
-            }
-
-            log.info("问答成功: userId={}, question={}", userId, request.getQuestion());
-
-            // 构建完整响应：数据库字段 + Agent Runtime 元数据
             Map<String, Object> resultData = new HashMap<>();
-            resultData.put("id", history.getId());
-            resultData.put("question", history.getQuestion());
-            resultData.put("answer", history.getAnswer());
-            resultData.put("sources", sources);
-            resultData.put("is_agg", history.getIsAgg());
-            resultData.put("image_urls", imageUrlsJson != null ? objectMapper.readValue(imageUrlsJson, List.class) : List.of());
-            resultData.put("create_time", history.getCreateTime());
-            // Agent Runtime 元数据
-            resultData.put("plan", plan);
-            resultData.put("agent_trace", agentTrace);
-            resultData.put("generated_code", generatedCode);
-            resultData.put("code_stdout", codeStdout);
-            resultData.put("code_error", codeError);
-            resultData.put("code_success", codeSuccess);
+            resultData.put("run_id", runId);
+            resultData.put("session_id", sessionId);
             return Result.ok(resultData);
+
         } catch (java.net.ConnectException e) {
             log.error("Python AI 服务连接失败: {}", e.getMessage());
             throw new BizException(AI_SERVICE_NOT_STARTED);

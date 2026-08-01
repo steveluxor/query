@@ -108,4 +108,20 @@ public class DocumentController {
         documentService.updateDocumentStatus(documentId, body.get("status"));
         return Result.ok();
     }
+
+    @GetMapping("/{id}/summary")
+    public Result getSummary(@PathVariable("id") Long documentId) {
+        Document doc = documentMapper.selectById(documentId);
+        return Result.ok(doc != null ? doc.getSummary() : null);
+    }
+
+    @PutMapping("/{id}/summary")
+    public Result updateSummary(@PathVariable("id") Long documentId,
+                                @RequestBody java.util.Map<String, String> body) {
+        Document doc = new Document();
+        doc.setId(documentId);
+        doc.setSummary(body.get("summary"));
+        documentMapper.updateDocument(doc);
+        return Result.ok();
+    }
 }

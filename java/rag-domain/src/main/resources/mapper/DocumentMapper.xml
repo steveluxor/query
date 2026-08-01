@@ -12,6 +12,7 @@
             <if test="fileType != null">file_type,</if>
             <if test="status != null">status,</if>
             <if test="permission != null">permission,</if>
+            <if test="summary != null">summary,</if>
             <if test="createUser != null">create_user,</if>
             <if test="updateUser != null">update_user,</if>
             create_time,
@@ -25,6 +26,7 @@
             <if test="fileType != null">#{fileType},</if>
             <if test="status != null">#{status},</if>
             <if test="permission != null">#{permission},</if>
+            <if test="summary != null">#{summary},</if>
             <if test="createUser != null">#{createUser},</if>
             <if test="updateUser != null">#{updateUser},</if>
             #{createTime},
@@ -59,6 +61,7 @@
             <if test="fileType != null">file_type = #{fileType},</if>
             <if test="status != null">status = #{status},</if>
             <if test="permission != null">permission = #{permission},</if>
+            <if test="summary != null">summary = #{summary},</if>
             update_time = NOW()
         </trim>
         where id = #{id}

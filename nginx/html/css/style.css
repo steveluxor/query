@@ -1,5 +1,5 @@
 /* ============================================
-   RAG 知识管理系统 - 样式表
+   智能知识问答系统 - 样式表
    ============================================ */
 
 :root {
@@ -1038,6 +1038,19 @@ input::placeholder {
     animation: dot-bounce 1.4s infinite ease-in-out;
 }
 
+.chat-dots span:not(:only-child) {
+    /* 保持三点动画的固定尺寸 */
+}
+.chat-dots span:only-child {
+    /* 替换为文字时取消固定尺寸 */
+    width: auto;
+    height: auto;
+    background: none;
+    border-radius: 0;
+    animation: none;
+    display: block;
+}
+
 .chat-dots span:nth-child(1) { animation-delay: 0s; }
 .chat-dots span:nth-child(2) { animation-delay: 0.2s; }
 .chat-dots span:nth-child(3) { animation-delay: 0.4s; }
@@ -1695,3 +1708,167 @@ input::placeholder {
 }
 
 /* (图表样式已合并到 result-workspace 区域) */
+
+/* ============================================
+   SSE 流式状态 — DAG 脉冲动画 + Trace Spinner
+   ============================================ */
+
+.dag-node.running {
+    border-color: #3b82f6;
+    color: #2563eb;
+    background: #eff6ff;
+    animation: dag-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes dag-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+}
+
+.dag-node.retrying {
+    border-color: #f59e0b;
+    color: #d97706;
+    background: #fffbeb;
+    animation: dag-pulse-warn 1.5s ease-in-out infinite;
+}
+
+@keyframes dag-pulse-warn {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+}
+
+/* 流式 Agent Trace 容器 */
+.streaming-trace {
+    padding: 12px 16px;
+    border-left: 3px solid var(--primary);
+    margin: 8px 0;
+    background: var(--gray-50);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.streaming-trace .trace-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.streaming-trace .trace-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    transition: background var(--transition);
+}
+
+.streaming-trace .trace-step.running {
+    background: #eff6ff;
+}
+
+.streaming-trace .trace-step.completed {
+    background: #f0fdf4;
+}
+
+.streaming-trace .trace-step.failed {
+    background: #fef2f2;
+}
+
+.streaming-trace .trace-step.retrying {
+    background: #fffbeb;
+}
+
+.streaming-trace .trace-icon {
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+}
+
+.streaming-trace .trace-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.streaming-trace .trace-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.streaming-trace .trace-agent-name {
+    font-weight: 500;
+    color: var(--gray-700);
+}
+
+.streaming-trace .trace-duration {
+    font-size: 12px;
+    color: var(--gray-400);
+    margin-left: auto;
+}
+
+.streaming-trace .trace-status {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.streaming-trace .trace-step.completed .trace-status {
+    color: #10b981;
+}
+
+.streaming-trace .trace-step.failed .trace-status {
+    color: #ef4444;
+}
+
+.streaming-trace .trace-objective {
+    font-size: 12px;
+    color: var(--gray-500);
+    margin-top: 2px;
+}
+
+.streaming-trace .trace-summary {
+    font-size: 12px;
+    color: var(--gray-500);
+    margin-top: 2px;
+}
+
+.streaming-trace .trace-arrow {
+    text-align: center;
+    color: var(--gray-300);
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 0;
+}
+
+/* Trace spinner（running 状态旋转动画） */
+.trace-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--gray-300);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Answer Token Streaming — 光标闪烁 */
+.answer-streaming::after {
+    content: '▋';
+    display: inline;
+    animation: cursor-blink 0.8s step-end infinite;
+    color: var(--primary);
+    font-weight: normal;
+}
+
+@keyframes cursor-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+/* Answer stream 容器 */
+.answer-stream {
+    margin: 4px 0;
+}

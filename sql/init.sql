@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS document (
     file_type VARCHAR(100),
     status VARCHAR(50),
     permission INT,
+    summary TEXT COMMENT '文档摘要（Python 生成）',
     create_time DATETIME,
     update_time DATETIME,
     create_user BIGINT,

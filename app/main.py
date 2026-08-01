@@ -11,11 +11,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 
 from app.api import ingestion, qa
+from app.config import settings
 from app.core.infra.llm_factory import create_llm
 from app.core.agent_memory import AgentMemory
 from app.core.infra.redis_store import RedisStore
+from app.core.infra.summary_cache import DocumentSummaryCache
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.mcp.client import MCPClient
+from app.core.runtime_event_bus import RuntimeEventBus
 from app.exceptions import BizException, ErrorCode
 from app.core.log_config import setup_logging
 
@@ -28,6 +31,13 @@ async def lifespan(application: FastAPI):
     llm = create_llm()
     application.state.agent_memory = AgentMemory()
     application.state.redis_store = RedisStore()
+    application.state.event_bus = RuntimeEventBus()
+
+    # 初始化摘要缓存
+    application.state.summary_cache = DocumentSummaryCache(
+        application.state.redis_store.client,
+        settings.java_base_url
+    )
 
     # 初始化 MCP Client
     mcp_client = MCPClient(

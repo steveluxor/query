@@ -7,6 +7,7 @@ from app.core.agent_memory import AgentMemory
 from app.core.infra.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
 from app.core.prompts.prompt_manager import PromptManager
+from app.core.runtime_event_bus import EventType
 from app.core.agent_registry import create_default_registry
 from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator, DAGDataFlowValidator
 from app.exceptions import PlannerError, WorkflowValidationError
@@ -40,6 +41,11 @@ class AgentOrchestrator:
         self.action_registry = ActionRegistry().create_default()
 
     async def run(self, context: AgentContext) -> AgentContext:
+        await context.emit(EventType.RUNTIME_STARTED, {
+            "session_id": context.session_id,
+            "question": context.question,
+        })
+
         # 1. 恢复记忆
         await self._restore_memory(context)
 
@@ -79,6 +85,13 @@ class AgentOrchestrator:
 
             if plan and plan.tasks:
                 context.plan = plan
+                await context.emit(EventType.PLAN_GENERATED, {
+                    "goal": plan.goal,
+                    "tasks": [
+                        {"id": t.id, "agent": t.agent, "objective": t.objective, "depends_on": t.depends_on}
+                        for t in plan.tasks
+                    ],
+                })
                 await self._execute_plan(context, plan)
 
             # 6. 更新记忆
@@ -239,6 +252,12 @@ class AgentOrchestrator:
         import time as _time
         task_start = _time.time()
 
+        await context.emit(EventType.AGENT_STARTED, {
+            "task_id": task.id,
+            "agent": task.agent,
+            "objective": task.objective,
+        })
+
         try:
             result = await agent.execute(
                 context, task_id=task.id,
@@ -260,9 +279,22 @@ class AgentOrchestrator:
 
             # actions → ActionRegistry（新增 action type 只需注册 Handler）
             for action in result.actions:
+                await context.emit(EventType.CONTROL_ACTION, {
+                    "task_id": task.id,
+                    "agent": task.agent,
+                    "action": action.action_type,
+                    "target_task_id": action.target_task_id,
+                })
                 await self.action_registry.handle(action, context, self)
 
             task.status = TaskStatus.COMPLETED
+            await context.emit(EventType.AGENT_COMPLETED, {
+                "task_id": task.id,
+                "agent": task.agent,
+                "duration_ms": task.duration_ms,
+                "summary": task.summary,
+                "tools_used": task.tools_used,
+            })
             # 收集 Agent 声明的工具名作为执行事实（供 memory 存储）
             if cap.tools:
                 context.tools_called.extend(cap.tools)
@@ -271,6 +303,12 @@ class AgentOrchestrator:
             task.summary = f"失败: {e}"
             logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
             task.status = TaskStatus.FAILED
+            await context.emit(EventType.AGENT_FAILED, {
+                "task_id": task.id,
+                "agent": task.agent,
+                "duration_ms": task.duration_ms,
+                "error": str(e),
+            })
             raise
         finally:
             context.question = original_question

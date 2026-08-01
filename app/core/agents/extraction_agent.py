@@ -47,6 +47,10 @@ class ExtractionAgent(BaseAgent):
         "规则：\n"
         "- 对当前文档，先识别文档主题，再提取其结构化属性\n"
         "- 如果文档不包含某属性的信息，omit 该 key 而非填空值\n"
+        "- attributes 值使用短语 + 信息密度，不要用完整句子\n"
+        "  正确: {\"purpose\": [\"S3C2410X中断控制\", \"ARM IRQ响应流程\"]}\n"
+        "  错误: {\"purpose\": \"掌握S3C2410X中断控制寄存器、中断响应过程以及ARM异常处理流程\"}\n"
+        "- evidence.statement 只写核心断言，一句话，50-80字以内\n"
         "- **对于表格/行数据（如 Excel 格式的账单、清单），每行提取为一个独立的知识对象**，attributes 包含该行的所有列值\n"
         "- 只输出 JSON，不要任何自然语言\n\n"
         "输出格式：\n"
@@ -61,7 +65,7 @@ class ExtractionAgent(BaseAgent):
         "  ],\n"
         '  "evidence": [\n'
         "    {\n"
-        '      "statement": "事实陈述",\n'
+        '      "statement": "核心断言，50-80字",\n'
         '      "source": "文件名",\n'
         '      "evidence_type": "text"\n'
         "    }\n"

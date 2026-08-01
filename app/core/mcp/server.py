@@ -6,8 +6,11 @@ from mcp.server.fastmcp import FastMCP
 
 from app.config import settings
 from app.core.infra.vector_store import VectorStore
+from app.core.infra.summary_cache import DocumentSummaryCache
+from app.core.infra.redis_store import RedisStore
 from app.core.rag_engine import RAGEngine, SearchContext
 from app.core.mcp.session_manager import SessionManager
+from app.core.prompts.prompt_manager import PromptManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -16,6 +19,8 @@ mcp = FastMCP("rag-tools")
 
 # 全局实例（启动时初始化）
 rag_engine: RAGEngine = None
+summary_cache: DocumentSummaryCache = None
+llm = None
 session_mgr = SessionManager()
 
 
@@ -48,8 +53,6 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
     raw_result = rag_engine._execute_search(query, row_start, row_end, ctx, strategy=strategy)
 
     # 缓存状态到 per-session
-    # 同时保存到 search_ctx（共享）和 search_contexts[task_id]（task 隔离）
-    # 这样下游 task（如 analysis/calculate_sum）在 task_id 不同时也能回退到 search_ctx
     session.search_ctx = ctx
     if task_id:
         session.search_contexts[task_id] = ctx
@@ -59,12 +62,54 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
     is_complete = "以上只显示了部分数据" not in raw_result if ctx.last_search_chunks else True
     available_actions = ["read_all_rows"] if not is_complete else []
 
-    return json.dumps({
+    result = {
         "rows_returned": rows_returned,
         "is_complete": is_complete,
         "available_actions": available_actions,
         "data": raw_result,
-    }, ensure_ascii=False)
+    }
+
+    # 摘要过滤：用 LLM 判断文档相关性
+    if summary_cache and raw_result:
+        try:
+            data_lines = raw_result.strip().split("\n")
+            doc_ids = set()
+            for line in data_lines:
+                if line.startswith("[文件:") and "]" in line:
+                    for did in session.document_ids:
+                        if str(did) in line:
+                            doc_ids.add(did)
+
+            if doc_ids:
+                summaries = await summary_cache.get_batch(list(doc_ids))
+                if summaries:
+                    relevant_ids = await _judge_relevance(query, summaries)
+                    filtered_lines = []
+                    skip_next = False
+                    for line in data_lines:
+                        if line.startswith("[文件:") and "]" in line:
+                            matched_id = None
+                            for did in session.document_ids:
+                                if str(did) in line:
+                                    matched_id = did
+                                    break
+                            if matched_id and matched_id not in relevant_ids:
+                                skip_next = True
+                                continue
+                            else:
+                                skip_next = False
+                        elif skip_next:
+                            continue
+                        filtered_lines.append(line)
+
+                    if filtered_lines:
+                        result["data"] = "\n".join(filtered_lines)
+                        result["filtered_by_summary"] = True
+                        logger.info("[MCP] 摘要过滤: %d -> %d 个文档", len(doc_ids), len(relevant_ids))
+        except Exception as e:
+            logger.warning("[MCP] 摘要过滤失败，使用原始结果: %s", e)
+
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -145,6 +190,8 @@ async def delete_document(session_id: str, document_id: int) -> str:
     """从知识库中删除指定文档的所有切片。"""
     logger.info("[MCP] delete_document (session=%s): document_id=%d", session_id[:8], document_id)
     rag_engine.vector_store.delete_by_document_id(document_id)
+    if summary_cache:
+        await summary_cache.delete(document_id)
     return f"已删除文档 {document_id}"
 
 
@@ -156,13 +203,46 @@ async def _cleanup_session(session_id: str) -> str:
     return "已清理"
 
 
+async def _judge_relevance(query: str, summaries: dict[int, str]) -> set[int]:
+    """LLM 批量判断文档相关性"""
+    if not summaries:
+        return set(summaries.keys())
+
+    summaries_text = "\n".join(
+        f"文档{did}: {summary}" for did, summary in summaries.items()
+    )
+
+    prompt = PromptManager.get("relevance", "judge").format(
+        question=query, summaries=summaries_text
+    )
+    response = await llm.ainvoke(prompt)
+
+    try:
+        result = json.loads(response.content)
+        return set(result.get("relevant_ids", summaries.keys()))
+    except:
+        return set(summaries.keys())
+
+
 async def main():
     """启动 MCP Server（stdio 模式）"""
-    global rag_engine
+    global rag_engine, summary_cache, llm
 
     # 初始化向量数据库和 RAG 引擎
     vs = VectorStore()
     rag_engine = RAGEngine(vs)
+
+    # 初始化摘要缓存
+    redis_store = RedisStore()
+    summary_cache = DocumentSummaryCache(redis_store.client, settings.java_base_url)
+
+    # 初始化 LLM（用于相关性判断）
+    from app.core.infra.llm_factory import create_llm
+    llm = create_llm()
+
+    # 加载提示词
+    PromptManager.initialize()
+
     logger.info("[MCP Server] 初始化完成，等待连接...")
 
     await mcp.run_stdio_async()

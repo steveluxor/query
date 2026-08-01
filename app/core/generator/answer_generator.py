@@ -5,6 +5,7 @@ from app.config import settings
 from app.core.agent_context import AgentContext
 from app.core.agents.base_agent import BaseAgent
 from app.core.prompts.prompt_manager import PromptManager
+from app.core.runtime_event_bus import EventType
 from app.models.data_types import AgentTrace, AnalysisResult, CodeResult, Evidence, KnowledgeObject
 from app.models.capability import AgentCapability
 
@@ -62,9 +63,14 @@ class AnswerGenerator(BaseAgent):
         prompt = self._build_prompt(context, evidence_list=evidences, analysis_result=analysis, source_meta=sources, structured_knowledge=knowledge, code_result=code_result)
 
         try:
-            result = await self.llm.ainvoke([("human", prompt)])
-            context.set_output("answer", result.content, producer="generator")
-            logger.info("[Generator] 生成回答完成，长度 %d", len(result.content))
+            full_answer = []
+            async for chunk in self.llm.astream([("human", prompt)]):
+                if chunk.content:
+                    full_answer.append(chunk.content)
+                    await context.emit(EventType.TOKEN_CHUNK, {"text": chunk.content})
+            answer = "".join(full_answer)
+            context.set_output("answer", answer, producer="generator")
+            logger.info("[Generator] 生成回答完成，长度 %d", len(answer))
         except Exception as e:
             logger.warning("[Generator] LLM 生成失败: %s", e)
             context.set_output("answer", self._fallback_answer(context, evidences), producer="generator")

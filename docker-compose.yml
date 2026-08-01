@@ -124,6 +124,7 @@ services:
       VECTOR_STORE_PATH: /app/chroma_db
       REDIS_HOST: redis
       REDIS_PASSWORD: sty01725
+      TZ: Asia/Shanghai
     volumes:
       - chroma-data:/app/chroma_db
       - temp-files:/tmp/rag_temp
@@ -177,6 +178,7 @@ services:
       - "8085:8085"
     environment:
       SPRING_PROFILES_ACTIVE: docker
+      TZ: Asia/Shanghai
     depends_on:
       mysql:
         condition: service_healthy

@@ -41,6 +41,10 @@ class AgentContext:
     preferences: dict | None = None
     plan: TaskGraph | None = None
 
+    # ==================== SSE Streaming ====================
+    run_id: str = ""
+    event_bus: object | None = None  # RuntimeEventBus（避免循环导入，用 object）
+
     # ==================== Agent 数据交换容器 ====================
     # key -> {task_id: AgentOutput} — 每个 output key 可被多个 task 写入
     outputs: dict[str, dict[str, AgentOutput]] = field(default_factory=dict)
@@ -159,3 +163,15 @@ class AgentContext:
 
     def add_trace(self, trace: AgentTrace):
         self.traces.append(trace)
+
+    # ==================== SSE 事件发射 ====================
+
+    async def emit(self, event_type, data: dict | None = None):
+        """便捷发射 SSE 事件（仅在 event_bus 存在时生效）"""
+        if self.event_bus and self.run_id:
+            from app.core.runtime_event_bus import RuntimeEvent
+            await self.event_bus.publish(RuntimeEvent(
+                run_id=self.run_id,
+                type=event_type,
+                data=data or {},
+            ))

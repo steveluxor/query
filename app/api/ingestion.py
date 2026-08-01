@@ -1,18 +1,29 @@
 import os
 import tempfile
+import logging
 
+import httpx
 import minio
 from fastapi import APIRouter, Depends, Request
 
 from app.config import settings
 from app.core.document_processor import DocumentProcessor
 from app.core.mcp.client import MCPClient
+from app.core.infra.summary_cache import DocumentSummaryCache
+from app.core.infra.llm_factory import create_llm
+from app.core.prompts.prompt_manager import PromptManager
 from app.models.schemas import IngestRequest, IngestResponse
 from app.exceptions import BizException, ErrorCode
+
+logger = logging.getLogger(__name__)
 
 
 def get_mcp_client(request: Request) -> MCPClient:
     return request.app.state.mcp_client
+
+
+def get_summary_cache(request: Request) -> DocumentSummaryCache:
+    return request.app.state.summary_cache
 
 
 router = APIRouter(prefix="/ingest", tags=["Ingestion"])
@@ -40,6 +51,7 @@ def _get_minio_client() -> minio.Minio:
 async def ingest_document(
     request: IngestRequest,
     mcp_client: MCPClient = Depends(get_mcp_client),
+    summary_cache: DocumentSummaryCache = Depends(get_summary_cache),
 ):
     """接收文档，执行解析、切片、向量化并存入向量库"""
     file_path = request.file_path
@@ -79,6 +91,16 @@ async def ingest_document(
         "metadatas": metadatas,
     }, session_id=INGESTION_SESSION)
 
+    # 生成文档摘要（一次性开销）
+    try:
+        all_text = "\n".join(texts)
+        summary = await _generate_summary(all_text)
+        if summary:
+            await summary_cache.set(request.document_id, summary)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("生成文档摘要失败: %s", e)
+
     return IngestResponse(
         document_id=request.document_id,
         status="success",
@@ -95,3 +117,14 @@ async def delete_document(
         "document_id": document_id,
     }, session_id=INGESTION_SESSION)
     return {"status": "deleted", "document_id": document_id}
+
+
+async def _generate_summary(content: str) -> str | None:
+    """调用 LLM 生成文档摘要"""
+    if not content.strip():
+        return None
+
+    llm = create_llm()
+    prompt = PromptManager.get("summary", "generate").format(content=content[:8000])
+    response = await llm.ainvoke(prompt)
+    return response.content.strip() if response.content else None

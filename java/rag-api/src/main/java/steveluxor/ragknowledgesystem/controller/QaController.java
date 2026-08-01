@@ -2,13 +2,16 @@ package steveluxor.ragknowledgesystem.controller;
 import java.lang.Long;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
 import steveluxor.ragknowledgesystem.common.Result;
 import steveluxor.ragknowledgesystem.dto.AskRequest;
 import steveluxor.ragknowledgesystem.service.QaService;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/qa")
@@ -26,6 +29,24 @@ public class QaController {
     public Result ask(@RequestBody AskRequest request) {
         log.info("问答请求: question={}, sessionId={}", request.getQuestion(), request.getSessionId());
         return qaService.ask(request);
+    }
+
+    @GetMapping(value = "/runtime/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamRuntime(@PathVariable("runId") String runId) {
+        log.info("SSE Runtime 连接: runId={}", runId);
+        return qaService.streamRuntime(runId);
+    }
+
+    @GetMapping(value = "/answer/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamAnswer(@PathVariable("runId") String runId) {
+        log.info("SSE Answer 连接: runId={}", runId);
+        return qaService.streamAnswer(runId);
+    }
+
+    @PostMapping("/callback")
+    public Result callback(@RequestBody Map<String, Object> body) {
+        log.info("Python Callback: sessionId={}", body.get("session_id"));
+        return qaService.handleCallback(body);
     }
 
     @GetMapping("/sessions")

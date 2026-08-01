@@ -21,4 +21,5 @@ public class Document extends BaseEntity {
     private String fileType;
     private String status;
     private Integer permission;
+    private String summary;
 }

@@ -1,8 +1,8 @@
-# Query - RAG 智能知识库问答系统 (Python AI 服务)
+# Query - 智能知识问答系统 (Python AI 服务)
 
 ## 系统架构
 
-本项目是一个 **RAG (Retrieval-Augmented Generation) 智能知识库问答系统**，采用 **Multi-Agent 架构**，通过 MCP (Model Context Protocol) 协议实现工具调用。
+本项目是一个 **基于 Multi-Agent 的智能知识问答系统**，采用 RAG (Retrieval-Augmented Generation) 技术，通过 MCP (Model Context Protocol) 协议实现工具调用。
 
 | 组件 | 路径 | 技术栈 | 端口 |
 |------|------|--------|------|
