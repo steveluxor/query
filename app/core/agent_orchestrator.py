@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import time
 
 from app.core.actions import ActionRegistry
-from app.core.agent_context import AgentContext, _task_id_var
+from app.core.agent_context import AgentContext, AgentStep, _task_id_var
 from app.core.agent_memory import AgentMemory
 from app.core.infra.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
@@ -71,6 +72,7 @@ class AgentOrchestrator:
                 )
 
             # 5. Planner 生成 TaskGraph（与偏好检测并行执行）
+            plan_start = time.time()
             try:
                 plan = await self._plan(context.question, context.memory_context, context.history)
                 if not plan or not plan.tasks:
@@ -85,10 +87,22 @@ class AgentOrchestrator:
 
             if plan and plan.tasks:
                 context.plan = plan
+                # 记录 Planner 步骤到 trace（供前端展示）
+                context.steps.append(AgentStep(
+                    name="Planner",
+                    duration_ms=int((time.time() - plan_start) * 1000),
+                    summary=f"生成 {len(plan.tasks)} 节点 DAG",
+                ))
+                planner_duration = int((time.time() - plan_start) * 1000)
                 await context.emit(EventType.PLAN_GENERATED, {
                     "goal": plan.goal,
+                    "planner": {
+                        "duration_ms": planner_duration,
+                        "summary": f"生成 {len(plan.tasks)} 节点 DAG",
+                    },
                     "tasks": [
-                        {"id": t.id, "agent": t.agent, "objective": t.objective, "depends_on": t.depends_on}
+                        {"id": t.id, "agent": t.agent, "objective": t.objective,
+                         "depends_on": t.depends_on, "status": t.status.value}
                         for t in plan.tasks
                     ],
                 })
@@ -143,11 +157,14 @@ class AgentOrchestrator:
                     logger.warning("[Orchestrator] 依赖环或无效依赖，跳过剩余 %d 个任务", len(pending))
                     break
 
-                await asyncio.gather(*(self._run_plan_task(
-                    context, task, original_question,
-                ) for task in ready))
-
-                for task in ready:
+                results = await asyncio.gather(
+                    *(self._run_plan_task(context, task, original_question) for task in ready),
+                    return_exceptions=True,
+                )
+                for task, result in zip(ready, results):
+                    if isinstance(result, Exception):
+                        task.status = TaskStatus.FAILED
+                        task.summary = f"失败: {result}"
                     completed_ids.add(task.id)
                     pending.remove(task)
 
@@ -249,8 +266,7 @@ class AgentOrchestrator:
         _task_id_var.set(task.id)
         context.question = task.objective
 
-        import time as _time
-        task_start = _time.time()
+        task_start = time.time()
 
         await context.emit(EventType.AGENT_STARTED, {
             "task_id": task.id,
@@ -267,7 +283,7 @@ class AgentOrchestrator:
             )
 
             # 收集 Agent 执行元数据到 TaskNode（供前端 Agent Trace 展示）
-            task.duration_ms = int((_time.time() - task_start) * 1000)
+            task.duration_ms = int((time.time() - task_start) * 1000)
             task.summary = result.summary
             task.tools_used = result.tools_used
             task.artifacts = result.artifacts
@@ -299,7 +315,7 @@ class AgentOrchestrator:
             if cap.tools:
                 context.tools_called.extend(cap.tools)
         except Exception as e:
-            task.duration_ms = int((_time.time() - task_start) * 1000)
+            task.duration_ms = int((time.time() - task_start) * 1000)
             task.summary = f"失败: {e}"
             logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
             task.status = TaskStatus.FAILED
@@ -494,7 +510,13 @@ class AgentOrchestrator:
             retrieval_task = next((t for t in plan.tasks if t.agent == "retrieval"), None)
             extractor_task = next((t for t in plan.tasks if t.agent == "extractor"), None)
             if generator_task:
-                max_id = max(int(t.id.replace("task", "")) for t in plan.tasks) + 1
+                existing_ids = set()
+                for t in plan.tasks:
+                    try:
+                        existing_ids.add(int(t.id.replace("task", "")))
+                    except ValueError:
+                        pass
+                max_id = (max(existing_ids) if existing_ids else 0) + 1
                 bindings = {"generated_answer": f"{generator_task.id}.answer"}
                 if extractor_task:
                     bindings["evidence_list"] = f"{extractor_task.id}.evidence"

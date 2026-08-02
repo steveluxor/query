@@ -76,7 +76,9 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
         try:
             while True:
                 event = await queue.get()
-                yield f"data: {json.dumps({'type': event.type.value, 'data': event.data})}\n\n"
+                event_type = event.type.value
+                payload = json.dumps({"type": event_type, "data": event.data})
+                yield f"event: {event_type}\ndata: {payload}\n\n"
                 if event.type in (EventType.RUNTIME_COMPLETED, EventType.RUNTIME_ERROR):
                     break
         except asyncio.CancelledError:

@@ -542,8 +542,7 @@
         } else {
             renderSessionList();
             updateQaHeader();
-            // 尝试恢复 SSE 状态，如果没有才加载历史
-            if (_restoreSseState(state.currentSessionId)) return;
+            // 等待首次 API 响应时，DOM 已有用户气泡+loading，不要覆盖
             if (!state.pendingSession && !state._awaitingFirstResponse) {
                 loadQaHistory();
             }
@@ -651,26 +650,15 @@
     async function handleSwitchSession(sessionId) {
         sessionId = Number(sessionId);
         if (!sessionId || sessionId === state.currentSessionId) return;
-
-        // 保存当前会话的 SSE 状态（如果有的话）
-        if (_activeRuntimeSSE) {
-            _saveSseState(state.currentSessionId);
-        }
-
         if (state.pendingSession) {
             state.pendingSession = null;
             state._pendingUserBubble = null;
             state._pendingLoadingBubble = null;
         }
-
         state.currentSessionId = sessionId;
         renderSessionList();
         updateQaHeader();
-
-        // 尝试恢复目标会话的 SSE 状态
-        if (!_restoreSseState(sessionId)) {
-            loadQaHistory();
-        }
+        loadQaHistory();
     }
 
     async function handleDeleteSession(btn) {
@@ -718,8 +706,9 @@
     let lastResponse = null; // 缓存最近一次响应
 
     const AGENT_LABELS = {
+        planner: '任务规划',
         retrieval: '知识检索',
-        extraction: '知识提取',
+        extractor: '知识抽取',
         analysis: '数据分析',
         code: '代码执行',
         generator: '答案生成',
@@ -728,13 +717,14 @@
     };
 
     const AGENT_ICONS = {
-        retrieval: '🔍',    // 🔍
-        extraction: '🔎',   // 🔎
-        analysis: '📊',     // 📊
-        code: '💻',         // 💻
-        generator: '✍️',    // ✍
-        critic: '🧠',       // 🧠
-        chat: '💬',         // 💬
+        planner: '📋',
+        retrieval: '🔍',
+        extractor: '🔎',
+        analysis: '📊',
+        code: '💻',
+        generator: '✍️',
+        critic: '🧠',
+        chat: '💬',
     };
 
     function getAgentLabel(agent) {
@@ -764,6 +754,22 @@
                 dependsOn: task.depends_on || [],
             };
         });
+
+        // 在最前面插入 Planner 步骤（来自 agent_trace，不在 plan tasks 中）
+        const plannerTrace = (agentTrace || []).find(t => t.name === 'Planner');
+        if (plannerTrace) {
+            steps.unshift({
+                id: 'planner',
+                agent: 'planner',
+                objective: '',
+                status: 'completed',
+                durationMs: plannerTrace.duration_ms || 0,
+                summary: plannerTrace.summary || '',
+                toolsUsed: [],
+                artifacts: [],
+                dependsOn: [],
+            });
+        }
 
         let html = '<div class="trace-steps">';
         steps.forEach((step, i) => {
@@ -1258,36 +1264,6 @@
         }
     }
 
-    // ==================== SSE 流式状态 ====================
-    let _activeRuntimeSSE = null;  // 当前活跃的 Runtime SSE 连接
-    let _activeAnswerSSE = null;   // 当前活跃的 Answer SSE 连接
-    let _streamingTraceSteps = []; // 流式 Agent Trace 步骤
-    let _streamingAnswer = '';     // 流式回答缓冲区
-    const _sseSessionStates = {}; // 按 sessionId 保存 SSE 状态（切换会话时暂存）
-
-    function _saveSseState(sessionId) {
-        if (!_activeRuntimeSSE) return;
-        // 关闭 SSE 连接（避免后台事件污染全局状态）
-        // Python 后台任务继续执行，callback 仍会持久化结果
-        if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
-        if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
-        _sseSessionStates[sessionId] = { pending: true };
-        _streamingTraceSteps = [];
-        _streamingAnswer = '';
-        state._pendingUserBubble = null;
-        state._pendingLoadingBubble = null;
-        state._awaitingFirstResponse = false;
-    }
-
-    function _restoreSseState(sessionId) {
-        const saved = _sseSessionStates[sessionId];
-        if (!saved) return false;
-        delete _sseSessionStates[sessionId];
-        // 切回时直接加载历史（后台任务可能已完成或仍在运行）
-        loadQaHistory();
-        return true;
-    }
-
     async function handleSendQuestion() {
         const question = els.qaInput.value.trim();
         if (!question) {
@@ -1301,10 +1277,6 @@
         if (qaLoading) return;
 
         els.qaInput.value = '';
-
-        // 关闭可能残留的 SSE 连接
-        if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
-        if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
 
         // 保留已有对话历史，在底部追加用户问题 + loading
         const existingChat = els.agentTrace.querySelector('.chat-history');
@@ -1334,7 +1306,6 @@
         try {
             qaLoading = true;
             els.qaSendBtn.disabled = true;
-            _streamingTraceSteps = [];
 
             const strategyValues = [null, 'diversity', 'relevance'];
             const activeBtn = els.qaStrategyGroup.querySelector('.qa-strategy-btn.active');
@@ -1350,19 +1321,24 @@
                 state._awaitingFirstResponse = true;
             }
 
-            // Phase 1: POST 获取 run_id（Python 异步执行）
-            const askResult = await Api.ask(question, state.currentSessionId, strategy);
-            const runId = askResult.run_id;
+            const response = await Api.ask(question, state.currentSessionId, strategy);
 
-            // Phase 2: 连接 SSE 流
-            await _connectRuntimeSSE(runId, wasPending);
-
+            // 判断是否为异步模式（返回 run_id）或缓存命中（返回完整结果）
+            if (response && response.run_id) {
+                // 异步模式：连接 SSE，实时更新 DAG
+                _connectSSE(response.run_id, () => {
+                    // SSE 完成后加载完整结果
+                    _finishQuestion(wasPending);
+                });
+            } else {
+                // 缓存命中：直接加载完整结果
+                await _finishQuestion(wasPending);
+            }
         } catch (err) {
             // 移除 loading 气泡，显示错误
             const loadingEl = document.getElementById('loadingBubble');
             if (loadingEl) loadingEl.remove();
             state._awaitingFirstResponse = false;
-            if (_activeRuntimeSSE) { _activeRuntimeSSE.close(); _activeRuntimeSSE = null; }
             showToast(err.message || '执行失败', 'error');
         } finally {
             qaLoading = false;
@@ -1370,382 +1346,332 @@
         }
     }
 
-    function _connectRuntimeSSE(runId, wasPending) {
-        return new Promise((resolve, reject) => {
-            const token = Api.getToken();
-            const url = `/qa/runtime/${runId}${token ? '?token=' + encodeURIComponent(token) : ''}`;
-            console.log('[SSE] Connecting runtime:', url);
-            const source = new EventSource(url);
-            _activeRuntimeSSE = source;
-
-            // 超时保护：300 秒（含 Critic 重试的复杂任务可能需要较长时间）
-            const timeout = setTimeout(() => {
-                console.warn('[SSE] Runtime timeout');
-                source.close();
-                _activeRuntimeSSE = null;
-                if (_activeAnswerSSE) { _activeAnswerSSE.close(); _activeAnswerSSE = null; }
-                const loadingEl = document.getElementById('loadingBubble');
-                if (loadingEl) loadingEl.remove();
-                showToast('响应超时，请刷新页面查看结果', 'warning');
-                reject(new Error('SSE timeout'));
-            }, 300000);
-
-            source.onopen = () => console.log('[SSE] Runtime connected');
-
-            // 同时连接 Answer SSE（token 流式输出）
-            _connectAnswerSSE(runId);
-
-            source.onmessage = (e) => {
-                const msg = JSON.parse(e.data);
-                const { type, data } = msg;
-                console.log('[SSE] Runtime event:', type);
-
-                switch (type) {
-                    case 'runtime_started':
-                        const dagEmpty = els.dagContent.querySelector('.dag-empty');
-                        if (dagEmpty) dagEmpty.textContent = 'Runtime 启动...';
-                        break;
-
-                    case 'plan_generated':
-                        _renderStreamingDag(data.tasks);
-                        _updateLoadingBubble('任务规划完成，开始执行...');
-                        break;
-
-                    case 'agent_started':
-                        _onAgentStarted(data);
-                        break;
-
-                    case 'agent_completed':
-                        _onAgentCompleted(data);
-                        break;
-
-                    case 'agent_failed':
-                        _onAgentFailed(data);
-                        break;
-
-                    case 'control_action':
-                        _onControlAction(data);
-                        break;
-
-                    case 'runtime_completed':
-                        clearTimeout(timeout);
-                        _onRuntimeCompleted(data, wasPending);
-                        source.close();
-                        _activeRuntimeSSE = null;
-                        resolve();
-                        break;
-
-                    case 'runtime_error':
-                        clearTimeout(timeout);
-                        source.close();
-                        _activeRuntimeSSE = null;
-                        const loadingEl = document.getElementById('loadingBubble');
-                        if (loadingEl) loadingEl.remove();
-                        showToast('执行失败: ' + (data.error || '未知错误'), 'error');
-                        reject(new Error(data.error));
-                        break;
-                }
-            };
-
-            source.onerror = (e) => {
-                console.error('[SSE] Runtime error, readyState:', source.readyState);
-                clearTimeout(timeout);
-                if (source.readyState === EventSource.CLOSED) return;
-                source.close();
-                _activeRuntimeSSE = null;
-                const loadingEl = document.getElementById('loadingBubble');
-                if (loadingEl) loadingEl.remove();
-                showToast('SSE 连接断开', 'error');
-                reject(new Error('SSE connection failed'));
-            };
-        });
-    }
-
-    // ==================== SSE 事件处理 ====================
-
-    function _updateLoadingBubble(text) {
-        const loadingEl = document.getElementById('loadingBubble');
-        if (loadingEl) {
-            const dots = loadingEl.querySelector('.chat-dots');
-            if (dots) dots.innerHTML = `<span style="font-size:12px;color:var(--gray-500);">${escapeHtml(text)}</span>`;
-        }
-    }
-
-    function _renderStreamingDag(tasks) {
-        // 将 plan tasks 转为 pending 状态的 DAG
-        const plan = tasks.map(t => ({
-            ...t,
-            status: 'pending',
-            duration_ms: 0,
-        }));
-        renderDagGraph(plan);
-    }
-
-    function _onAgentStarted(data) {
-        const { task_id, agent, objective } = data;
-
-        // 更新 DAG 节点状态为 running
-        updateDagNodeStatus(task_id, 'running');
-
-        // 更新 loading 气泡
-        const label = getAgentLabel(agent);
-        _updateLoadingBubble(`${label} 正在执行...`);
-
-        // 追加 Agent Trace 步骤（running 状态）
-        _streamingTraceSteps.push({
-            id: task_id,
-            agent: agent,
-            objective: objective,
-            status: 'running',
-            startTime: Date.now(),
-            durationMs: 0,
-            summary: '',
-            toolsUsed: [],
-        });
-        _renderStreamingTrace();
-    }
-
-    function _onAgentCompleted(data) {
-        const { task_id, agent, duration_ms, summary, tools_used } = data;
-
-        // 更新 DAG 节点状态为 completed
-        updateDagNodeStatus(task_id, 'completed');
-
-        // 更新 Trace 步骤
-        const step = _streamingTraceSteps.find(s => s.id === task_id);
-        if (step) {
-            step.status = 'completed';
-            step.durationMs = duration_ms;
-            step.summary = summary;
-            step.toolsUsed = tools_used || [];
-        }
-        _renderStreamingTrace();
-    }
-
-    function _onAgentFailed(data) {
-        const { task_id, agent, duration_ms, error } = data;
-
-        updateDagNodeStatus(task_id, 'failed');
-
-        const step = _streamingTraceSteps.find(s => s.id === task_id);
-        if (step) {
-            step.status = 'failed';
-            step.durationMs = duration_ms;
-            step.summary = '失败: ' + error;
-        }
-        _renderStreamingTrace();
-    }
-
-    function _onControlAction(data) {
-        const { task_id, agent, action, target_task_id } = data;
-
-        // 在 Trace 中追加控制动作记录
-        const label = getAgentLabel(agent);
-        const actionLabel = action === 'retry' ? `重试 ${target_task_id}` : action;
-        _updateLoadingBubble(`${label}: ${actionLabel}`);
-
-        // 如果是 retry，将目标 task 状态重置为 pending
-        if (action === 'retry' && target_task_id) {
-            updateDagNodeStatus(target_task_id, 'retrying');
-            const step = _streamingTraceSteps.find(s => s.id === target_task_id);
-            if (step) {
-                step.status = 'retrying';
-                step.summary = '重试中...';
-            }
-            _renderStreamingTrace();
-        }
-    }
-
-    async function _onRuntimeCompleted(data, wasPending) {
-        // 关闭 Answer SSE（如果还开着）
-        if (_activeAnswerSSE) {
-            _activeAnswerSSE.close();
-            _activeAnswerSSE = null;
-        }
-
-        // 移除 loading 气泡
-        const loadingEl = document.getElementById('loadingBubble');
-        if (loadingEl) loadingEl.remove();
+    async function _finishQuestion(wasPending) {
+        _removeLiveTrace();
+        await loadQaHistory();
         state._pendingUserBubble = null;
         state._pendingLoadingBubble = null;
         state._awaitingFirstResponse = false;
-
-        // 用 runtime_completed 事件中的数据直接渲染结果（不依赖 DB 持久化）
-        const planData = data.plan || null;
-        const traceHtml = planData ? renderAgentTrace(planData, data.agent_trace || []) : '';
-
-        // 如果有流式回答，用它；否则用 data.answer
-        const answer = _streamingAnswer || data.answer || '';
-
-        // 渲染回答区（替换流式光标为最终版本）
-        if (answer) {
-            const chatHistory = els.agentTrace.querySelector('.chat-history');
-            const answerContainer = chatHistory?.querySelector('.answer-stream');
-            if (answerContainer) {
-                answerContainer.innerHTML = `
-                    <div class="chat-bubble ai-bubble">
-                        <div class="chat-text">${renderMarkdown(answer)}</div>
-                    </div>`;
-            }
-        }
-
-        // 渲染 DAG（最终状态）
-        if (planData) {
-            renderDagGraph(planData);
-        }
-
-        // 渲染结果 tabs（sources、code、charts）
-        const imageUrls = data.image_urls || [];
-        const sources = (data.sources || []).map(s =>
-            typeof s === 'string' ? JSON.parse(s) : s
-        );
-        renderResultTabs({
-            answer: answer,
-            image_urls: imageUrls,
-            sources: sources,
-            plan: planData,
-            _traceHtml: traceHtml,
-            generated_code: data.generated_code || '',
-            code_stdout: data.code_stdout || '',
-            code_error: data.code_error || '',
-            code_success: data.code_success !== false,
-        });
-
-        // 重新加载对话历史（异步，不影响当前渲染）
-        loadQaHistory().catch(() => {});
-
-        // pending → 真实 session 后，刷新会话列表
         if (wasPending) {
             await loadSessions();
         }
     }
 
-    // ==================== Answer Token Streaming ====================
+    // SSE 双流：实时 DAG + Agent 进度
+    let _currentRuntimeSource = null;
+    let _liveTraceSteps = [];    // 当前执行的 trace 步骤
+    let _liveTraceEl = null;     // 中间区域的实时 trace DOM 元素
 
-    function _connectAnswerSSE(runId) {
-        _streamingAnswer = '';
-        const token = Api.getToken();
-        const url = `/qa/answer/${runId}${token ? '?token=' + encodeURIComponent(token) : ''}`;
-        console.log('[SSE] Connecting answer:', url);
-        const source = new EventSource(url);
-        _activeAnswerSSE = source;
-
-        source.onopen = () => console.log('[SSE] Answer connected');
-
-        source.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.type === 'done') {
-                console.log('[SSE] Answer done');
-                source.close();
-                _activeAnswerSSE = null;
-                return;
-            }
-            // token chunk
-            _streamingAnswer += data.text;
-            _renderStreamingAnswer(_streamingAnswer);
-        };
-
-        source.onerror = (e) => {
-            console.error('[SSE] Answer error, readyState:', source.readyState);
-            if (source.readyState === EventSource.CLOSED) return;
-            source.close();
-            _activeAnswerSSE = null;
-        };
-    }
-
-    function _renderStreamingAnswer(text) {
-        // 在 loading 气泡位置渲染流式回答
-        const chatHistory = els.agentTrace.querySelector('.chat-history');
-        if (!chatHistory) return;
-
-        // 查找或创建 answer-stream 容器
-        let answerContainer = chatHistory.querySelector('.answer-stream');
-        if (!answerContainer) {
-            answerContainer = document.createElement('div');
-            answerContainer.className = 'chat-msg ai-msg answer-stream';
-            // 插入到 streaming-trace 之后
-            const traceContainer = chatHistory.querySelector('.streaming-trace');
-            if (traceContainer) {
-                traceContainer.insertAdjacentHTML('afterend', '');
-                traceContainer.parentNode.insertBefore(answerContainer, traceContainer.nextSibling);
-            } else {
-                chatHistory.appendChild(answerContainer);
-            }
+    function _connectSSE(runId, onComplete) {
+        // 关闭旧连接
+        if (_currentRuntimeSource) {
+            _currentRuntimeSource.close();
+            _currentRuntimeSource = null;
         }
 
-        answerContainer.innerHTML = `
-            <div class="chat-bubble ai-bubble">
-                <div class="chat-text answer-streaming">${renderMarkdown(text)}</div>
-            </div>`;
+        const token = localStorage.getItem('rag_token') || '';
+        const runtimeSource = new EventSource(`/qa/runtime/${runId}?token=${encodeURIComponent(token)}`);
+        _currentRuntimeSource = runtimeSource;
+        let currentPlan = null;
 
-        // 滚动到底部
-        chatHistory.scrollTop = chatHistory.scrollHeight;
-    }
-
-    // ==================== DAG 实时状态更新 ====================
-
-    function updateDagNodeStatus(taskId, status) {
-        const node = document.querySelector(`.dag-node[data-step-id="${taskId}"]`);
-        if (!node) return;
-        // 移除旧状态 class
-        node.classList.remove('pending', 'running', 'completed', 'failed', 'retrying');
-        node.classList.add(status);
-    }
-
-    // ==================== 流式 Agent Trace 渲染 ====================
-
-    function _renderStreamingTrace() {
-        const container = els.agentTrace;
-        const chatHistory = container.querySelector('.chat-history');
-        if (!chatHistory) return;
-
-        // 查找或创建 streaming-trace 容器
-        let traceContainer = chatHistory.querySelector('.streaming-trace');
-        if (!traceContainer) {
-            traceContainer = document.createElement('div');
-            traceContainer.className = 'streaming-trace';
-            // 插入到 loading 气泡之前
-            const loadingBubble = document.getElementById('loadingBubble');
-            if (loadingBubble) {
-                chatHistory.insertBefore(traceContainer, loadingBubble);
-            } else {
-                chatHistory.appendChild(traceContainer);
+        runtimeSource.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                _handleRuntimeEvent(msg, currentPlan);
+            } catch (e) {
+                console.warn('[SSE] 解析失败:', e);
             }
+        };
+
+        // 监听自定义事件（plan_generated 等）
+        runtimeSource.addEventListener('plan_generated', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.tasks) {
+                    currentPlan = msg.data.tasks;
+                    _renderLiveDag(currentPlan);
+                    // 初始化步骤数据：Planner（已完成）+ 其他任务（等待中）
+                    _liveTraceSteps = [];
+                    if (msg.data.planner) {
+                        _liveTraceSteps.push({
+                            id: 'planner', agent: 'planner', objective: '',
+                            status: 'completed', durationMs: msg.data.planner.duration_ms || 0,
+                            summary: msg.data.planner.summary || '', toolsUsed: [],
+                        });
+                    }
+                    currentPlan.forEach(t => {
+                        _liveTraceSteps.push({
+                            id: t.id, agent: t.agent, objective: t.objective || '',
+                            status: 'pending', durationMs: 0, summary: '', toolsUsed: [],
+                        });
+                    });
+                    _renderLiveTrace(); // 显示 Planner 步骤
+                }
+            } catch (e) {
+                console.warn('[SSE] plan_generated 解析失败:', e);
+            }
+        });
+
+        runtimeSource.addEventListener('agent_started', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.task_id) {
+                    _updateDagNodeStatus(msg.data.task_id, 'running');
+                    const step = _liveTraceSteps.find(s => s.id === msg.data.task_id);
+                    if (step) {
+                        step.status = 'running';
+                        step.objective = msg.data.objective || step.objective;
+                        _renderLiveTrace(); // 逐步追加显示
+                    }
+                }
+            } catch (e) {
+                console.warn('[SSE] agent_started 解析失败:', e);
+            }
+        });
+
+        runtimeSource.addEventListener('agent_completed', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.task_id) {
+                    _updateDagNodeStatus(msg.data.task_id, 'completed');
+                    const step = _liveTraceSteps.find(s => s.id === msg.data.task_id);
+                    if (step) {
+                        step.status = 'completed';
+                        step.durationMs = msg.data.duration_ms || 0;
+                        step.summary = msg.data.summary || '';
+                        step.toolsUsed = msg.data.tools_used || [];
+                        _renderLiveTrace();
+                    }
+                }
+            } catch (e) {
+                console.warn('[SSE] agent_completed 解析失败:', e);
+            }
+        });
+
+        runtimeSource.addEventListener('agent_failed', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.task_id) {
+                    _updateDagNodeStatus(msg.data.task_id, 'failed');
+                    const step = _liveTraceSteps.find(s => s.id === msg.data.task_id);
+                    if (step) { step.status = 'failed'; step.summary = msg.data.error || '失败'; _renderLiveTrace(); }
+                }
+            } catch (e) {
+                console.warn('[SSE] agent_failed 解析失败:', e);
+            }
+        });
+
+        runtimeSource.addEventListener('runtime_completed', () => {
+            runtimeSource.close();
+            _currentRuntimeSource = null;
+            if (onComplete) onComplete();
+        });
+
+        runtimeSource.addEventListener('runtime_error', () => {
+            runtimeSource.close();
+            _currentRuntimeSource = null;
+            if (onComplete) onComplete();
+        });
+
+        runtimeSource.onerror = () => {
+            runtimeSource.close();
+            _currentRuntimeSource = null;
+            // SSE 断开不报错，等 runtime_completed/runtime_error 或超时
+        };
+    }
+
+    function _handleRuntimeEvent(msg, plan) {
+        // 通用事件处理（onmessage 兜底）
+        if (!msg.type || !plan) return;
+        // agent 事件已在 addEventListener 中处理，这里做兜底
+    }
+
+    // 实时 trace：仅显示已开始的步骤（逐步追加）
+    function _renderLiveTrace() {
+        const container = els.agentTrace;
+        // 只渲染已开始的步骤（running/completed/failed），跳过 pending
+        const activeSteps = _liveTraceSteps.filter(s => s.status !== 'pending');
+        if (activeSteps.length === 0) return;
+
+        // 创建或复用 live trace 容器
+        if (!_liveTraceEl) {
+            _liveTraceEl = document.createElement('div');
+            _liveTraceEl.className = 'live-trace';
         }
 
         let html = '<div class="trace-steps">';
-        _streamingTraceSteps.forEach((step, i) => {
+        activeSteps.forEach((step, i) => {
             const icon = getAgentIcon(step.agent);
             const label = getAgentLabel(step.agent);
             const statusClass = step.status;
             const duration = step.durationMs >= 1000
                 ? (step.durationMs / 1000).toFixed(1) + 's'
-                : step.durationMs > 0 ? step.durationMs + 'ms' : '';
+                : step.durationMs + 'ms';
 
-            let statusIcon = '';
-            if (step.status === 'running') statusIcon = '<span class="trace-spinner"></span>';
-            else if (step.status === 'completed') statusIcon = '✓';
-            else if (step.status === 'failed') statusIcon = '✗';
-            else if (step.status === 'retrying') statusIcon = '↻';
+            let detailHtml = '';
+            if (step.summary) {
+                detailHtml += `<div class="trace-summary">${escapeHtml(step.summary)}</div>`;
+            }
+            if (step.toolsUsed && step.toolsUsed.length > 0) {
+                detailHtml += '<div class="trace-tools">' +
+                    step.toolsUsed.map(t => `<span class="trace-tool-tag">${escapeHtml(t)}</span>`).join('') +
+                    '</div>';
+            }
 
             if (i > 0) html += '<div class="trace-arrow">↓</div>';
 
             html += `
-                <div class="trace-step ${statusClass}" data-step-id="${step.id}">
+                <div class="trace-step ${statusClass}">
                     <div class="trace-icon">${icon}</div>
                     <div class="trace-body">
                         <div class="trace-header">
                             <span class="trace-agent-name">${label} (${step.agent})</span>
-                            <span class="trace-status">${statusIcon}</span>
-                            ${duration ? `<span class="trace-duration">${duration}</span>` : ''}
+                            <span class="trace-duration">${step.status === 'running' ? '执行中...' : duration}</span>
                         </div>
                         ${step.objective ? `<div class="trace-objective">${escapeHtml(step.objective)}</div>` : ''}
-                        ${step.summary ? `<div class="trace-summary">${escapeHtml(step.summary)}</div>` : ''}
+                        ${detailHtml}
                     </div>
                 </div>`;
         });
         html += '</div>';
-        traceContainer.innerHTML = html;
+        _liveTraceEl.innerHTML = html;
+
+        // 插入到 chat-history 之后（如果还没有的话）
+        if (!_liveTraceEl.parentElement) {
+            const chatHistory = container.querySelector('.chat-history');
+            if (chatHistory) {
+                chatHistory.after(_liveTraceEl);
+            } else {
+                container.appendChild(_liveTraceEl);
+            }
+        }
+
+        // 自动滚动到底部
+        const scroll = container.closest('.main-scroll');
+        if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    }
+
+    function _removeLiveTrace() {
+        if (_liveTraceEl && _liveTraceEl.parentElement) {
+            _liveTraceEl.remove();
+        }
+        _liveTraceEl = null;
+        _liveTraceSteps = [];
+    }
+
+    // 实时渲染 DAG（所有节点初始为 pending）
+    function _renderLiveDag(tasks) {
+        if (!tasks || tasks.length === 0) return;
+
+        let html = `
+            <div class="dag-legend">
+                <div class="dag-legend-item"><span class="dag-legend-dot completed"></span>完成</div>
+                <div class="dag-legend-item"><span class="dag-legend-dot failed"></span>失败</div>
+                <div class="dag-legend-item"><span class="dag-legend-dot running"></span>执行中</div>
+                <div class="dag-legend-item"><span class="dag-legend-dot pending"></span>等待中</div>
+            </div>`;
+
+        // 拓扑排序分层
+        const levels = topologicalLevels(tasks);
+        html += '<div class="dag-graph">';
+
+        // Planner 根节点
+        html += '<div class="dag-row"><div class="dag-node planner completed" data-task-id="planner">📋 Planner</div></div>';
+
+        levels.forEach((level) => {
+            html += '<div class="dag-row">';
+            level.forEach(task => {
+                const icon = getAgentIcon(task.agent);
+                const label = getAgentLabel(task.agent);
+                const taskLabel = `${task.id} ${label}`;
+                html += `<div class="dag-node pending" data-task-id="${task.id}"><span class="dag-node-icon">${icon}</span>${escapeHtml(taskLabel)}</div>`;
+            });
+            html += '</div>';
+        });
+
+        html += '</div>';
+        els.dagContent.innerHTML = html;
+
+        // 渲染后绘制 SVG 箭头（延迟确保布局完成）
+        setTimeout(() => _drawLiveDagArrows(tasks, levels), 50);
+    }
+
+    function _drawLiveDagArrows(tasks, levels) {
+        const graph = els.dagContent.querySelector('.dag-graph');
+        if (!graph) return;
+
+        const oldSvg = graph.querySelector('svg.dag-arrows');
+        if (oldSvg) oldSvg.remove();
+
+        const graphRect = graph.getBoundingClientRect();
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.classList.add('dag-arrows');
+        svg.style.width = graph.scrollWidth + 'px';
+        svg.style.height = graph.scrollHeight + 'px';
+
+        const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+        const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+        marker.setAttribute('id', 'arrowhead');
+        marker.setAttribute('markerWidth', '8');
+        marker.setAttribute('markerHeight', '6');
+        marker.setAttribute('refX', '8');
+        marker.setAttribute('refY', '3');
+        marker.setAttribute('orient', 'auto');
+        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygon.setAttribute('points', '0 0, 8 3, 0 6');
+        polygon.setAttribute('fill', '#94a3b8');
+        marker.appendChild(polygon);
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+
+        const nodePositions = {};
+        graph.querySelectorAll('.dag-node').forEach(node => {
+            const id = node.dataset.taskId;
+            const r = node.getBoundingClientRect();
+            nodePositions[id] = {
+                cx: r.left + r.width / 2 - graphRect.left + graph.scrollLeft,
+                top: r.top - graphRect.top + graph.scrollTop,
+                bottom: r.bottom - graphRect.top + graph.scrollTop,
+            };
+        });
+
+        // Planner → 第一层
+        if (nodePositions['planner'] && levels.length > 0) {
+            levels[0].forEach(task => {
+                if (nodePositions[task.id]) {
+                    drawArrow(svg, nodePositions['planner'].cx, nodePositions['planner'].bottom,
+                              nodePositions[task.id].cx, nodePositions[task.id].top);
+                }
+            });
+        }
+
+        // 各层之间按 depends_on 画箭头
+        const taskMap = {};
+        tasks.forEach(t => { taskMap[t.id] = t; });
+
+        for (let li = 1; li < levels.length; li++) {
+            levels[li].forEach(task => {
+                if (!task.depends_on || !nodePositions[task.id]) return;
+                task.depends_on.forEach(depId => {
+                    if (nodePositions[depId]) {
+                        drawArrow(svg, nodePositions[depId].cx, nodePositions[depId].bottom,
+                                  nodePositions[task.id].cx, nodePositions[task.id].top);
+                    }
+                });
+            });
+        }
+
+        graph.appendChild(svg);
+    }
+
+    // 实时更新 DAG 节点状态
+    function _updateDagNodeStatus(taskId, status) {
+        const node = els.dagContent.querySelector(`.dag-node[data-task-id="${taskId}"]`);
+        if (node) {
+            // 移除旧状态类
+            node.classList.remove('pending', 'running', 'completed', 'failed');
+            node.classList.add(status);
+        }
     }
 
     // ============================================
@@ -2179,6 +2105,38 @@
             showToast('请先登录', 'info');
         }
     }
+
+    // 拖拽调整结果区域高度
+    (function initResize() {
+        const handle = document.getElementById('resizeHandle');
+        const workspace = document.getElementById('resultWorkspace');
+        if (!handle || !workspace) return;
+
+        let startY, startHeight;
+
+        handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startY = e.clientY;
+            startHeight = workspace.offsetHeight;
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', onDragEnd);
+            document.body.style.cursor = 'ns-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        function onDrag(e) {
+            const delta = startY - e.clientY;
+            const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
+            workspace.style.height = newHeight + 'px';
+        }
+
+        function onDragEnd() {
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup', onDragEnd);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        }
+    })();
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);

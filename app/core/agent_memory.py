@@ -127,10 +127,13 @@ class AgentMemory:
         memory.last_accessed = time.time()
 
         # 填充 recent_history 缓存（最近 5 轮）
-        memory.recent_history = [
-            {"question": h.get("question", ""), "answer": h.get("answer", ""), "is_agg": h.get("is_agg", False)}
-            for h in history[-5:]
-        ]
+        recent = []
+        for h in history[-5:]:
+            if isinstance(h, dict):
+                recent.append({"question": h.get("question", ""), "answer": h.get("answer", ""), "is_agg": h.get("is_agg", False)})
+            else:
+                recent.append({"question": h.question or "", "answer": h.answer or "", "is_agg": h.is_agg or False})
+        memory.recent_history = recent
 
         logger.info("rebuild_from_history: session=%s, turns=%d, prefs=%s",
                      session_id, len(history), bool(preferences))

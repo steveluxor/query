@@ -120,14 +120,18 @@ v11 (SSE 双流 + LLM 推理管线优化):
   [v11: 新增] SSE 双流: /qa/runtime/{run_id}（Workflow 层）+ /qa/answer/{run_id}（Generation 层 token 增量）
   [v11: 新增] RuleValidator: 纯确定性规则检查器（空 answer + 数值一致性 normalize）
   [v11: 新增] Token Metrics: 每个 Agent 记录 input_tokens / output_tokens / latency
-  [v11: 修改] /qa/ask: 异步模式，立即返回 run_id，后台 asyncio.create_task 执行
+  [v11: 新增] Planner AgentStep: Planner 完成后写入 context.steps，前端 trace 首行显示 Planner
+  [v11: 新增] plan_generated 事件: 携带 tasks 含 status 字段，前端 DAG 实时渲染
+  [v11: 修改] /qa/ask: 异步模式，Python 立即返回 run_id，后台 asyncio.create_task 执行
+  [v11: 修改] Java /qa/ask: 简化为只拿 run_id 立即返回，所有持久化移到 /qa/callback
+  [v11: 新增] Java /qa/callback: Python 执行完后 POST 完整结果，Java 持久化到 MySQL/Redis/MinIO
+  [v11: 修改] Nginx: /qa/runtime/ 和 /qa/answer/ 直接代理到 Python(:8000)，绕过 Java
   [v11: 修改] Critic 架构: 单级 LLM → 两级（RuleValidator <100ms + Slim LLM Critic 5-15s）
   [v11: 修改] Critic prompt: 删除 retrieval_report/task_plan，改为"矛盾检测"而非"支撑检测"
   [v11: 修改] Generator prompt: KnowledgeObjects token budget + analysis 只传 calculations + conclusions
   [v11: 修改] Extractor prompt: attributes 从完整句子改为短语 + 证据从冗长改为 50-80 字核心断言
   [v11: 修改] AgentContext: +run_id +event_bus +emit() 方法
-  [v11: 修改] Java QaController: +SseEmitter 代理端点 + /qa/callback 接收持久化
-  [v11: 修改] 前端: EventSource 接收 token 流，逐字渲染 answer
+  [v11: 修改] 前端: EventSource 接收 SSE 实时更新 DAG 状态 + trace 首行显示 Planner
 ```
 
 ---
@@ -197,8 +201,9 @@ class RuntimeEventBus:
 | 端点 | 说明 | 事件类型 |
 |------|------|----------|
 | `POST /qa/ask` | 异步启动，返回 `{run_id, session_id}` | — |
-| `GET /qa/runtime/{run_id}` | Workflow 层事件流（低频） | agent_started, agent_completed, runtime_completed 等 |
-| `GET /qa/callback` | Java 持久化回调（POST） | — |
+| `GET /qa/runtime/{run_id}` | Workflow 层事件流（低频） | plan_generated, agent_started, agent_completed, runtime_completed 等 |
+| `GET /qa/answer/{run_id}` | Generation 层 token 增量（高频） | token_chunk, done |
+| `POST /qa/callback` | Python → Java 持久化回调 | — |
 
 **`/qa/runtime/{run_id}` 流程：**
 ```python
@@ -243,33 +248,65 @@ class AgentContext:
 
 ### Agent 发射事件的位置
 
-| Agent | 发射点 | 事件类型 |
-|-------|--------|----------|
-| Orchestrator | `_execute_plan` 开始 | `RUNTIME_STARTED` |
-| Orchestrator | `_plan()` 完成 | `PLAN_GENERATED` |
-| Runtime | `_run_plan_task` 开始 | `AGENT_STARTED` |
-| Runtime | `_run_plan_task` 完成 | `AGENT_COMPLETED` |
-| Generator | `astream` 每个 chunk | `TOKEN_CHUNK` |
+| Agent | 发射点 | 事件类型 | 数据 |
+|-------|--------|----------|------|
+| Orchestrator | `run()` 开始 | `RUNTIME_STARTED` | session_id, question |
+| Orchestrator | `_plan()` 完成 | `PLAN_GENERATED` | goal, tasks[{id, agent, objective, depends_on, status}] |
+| Runtime | `_run_plan_task` 开始 | `AGENT_STARTED` | task_id, agent, objective |
+| Runtime | `_run_plan_task` 完成 | `AGENT_COMPLETED` | task_id, agent, duration_ms, summary, tools_used |
+| Runtime | `_run_plan_task` 失败 | `AGENT_FAILED` | task_id, agent, duration_ms, error |
+| Generator | `astream` 每个 chunk | `TOKEN_CHUNK` | token 增量 |
+| Orchestrator | 全部完成 | `RUNTIME_COMPLETED` | 完整 result |
+| Orchestrator | 异常 | `RUNTIME_ERROR` | error |
+
+**Planner 步骤记录：** `_plan()` 完成后，Orchestrator 将 Planner 作为 AgentStep 写入 `context.steps`（供前端 trace 展示），同时发射 `PLAN_GENERATED` 事件（含 task status 字段供前端 DAG 实时渲染）。
 | Orchestrator | 全部完成 | `RUNTIME_COMPLETED` |
 
-### Java 端代理
+### Java 端 — /qa/ask 简化 + /qa/callback 持久化
 
-**文件**: `java/.../controller/QaController.java`
+**文件**: `java/.../service/QaServiceImpl.java`
 
 ```
-前端 → Java SSE 代理 → Python SSE
-Java 负责：
-  1. SseEmitter 代理：转发 Python 的 SSE 事件到前端
-  2. /qa/callback POST：接收 Python 的完整结果，持久化到 MySQL/Redis/MinIO
+前端 → Java POST /qa/ask → 调 Python /qa/ask → 拿到 {run_id}
+  → 立即返回 {run_id} 给前端（不等待 Python 执行完成）
+
+Python 后台执行完成 → POST /qa/callback → Java 持久化到 MySQL/Redis/MinIO
 ```
+
+**关键变更：**
+- `ask()`: 只调 Python 拿 run_id，不再同步等待完整结果
+- `handleCallback()`: 接收 Python callback，执行全部持久化逻辑（Redis memory + Redis history + MinIO 图片 + MySQL 插入 + 会话标题）
+- `sessionUserMap`: ConcurrentHashMap，ask() 写入 session→userId，handleCallback() 读取后清除
+
+### Nginx SSE 代理
+
+**文件**: `nginx.conf` / `nginx-docker.conf`
+
+```
+/qa/runtime/  → Python(:8000)  ← SSE 端点直接到 Python，绕过 Java
+/qa/answer/   → Python(:8000)  ← SSE 端点直接到 Python
+/qa/*         → Java(:8085)    ← 其他 QA 接口走 Java
+```
+
+SSE 需要关闭缓冲：`proxy_buffering off; proxy_cache off; proxy_http_version 1.1;`
 
 ### 前端 EventSource
 
 ```
-POST /qa/ask → 获得 run_id
-  → new EventSource("/api/qa/runtime/" + run_id)  → 显示 Agent 进度
-  → new EventSource("/api/qa/stream/" + run_id)    → 逐字渲染 answer
+POST /qa/ask → 获得 {run_id, session_id}
+  → new EventSource("/qa/runtime/" + run_id)
+      → plan_generated: 立即渲染 DAG（所有节点 pending）
+      → agent_started:  更新 DAG 节点为 running
+      → agent_completed: 更新 DAG 节点为 completed
+      → agent_failed:   更新 DAG 节点为 failed
+      → runtime_completed: 关闭 SSE，调 loadQaHistory() 加载完整结果
 ```
+
+**前端 DAG 实时渲染流程：**
+1. 收到 `plan_generated` 事件 → `_renderLiveDag(tasks)` 立即显示 DAG（所有节点灰色 pending）
+2. 收到 `agent_started` 事件 → `_updateDagNodeStatus(taskId, 'running')` 节点变蓝
+3. 收到 `agent_completed` 事件 → `_updateDagNodeStatus(taskId, 'completed')` 节点变绿
+4. 收到 `runtime_completed` 事件 → 关闭 SSE → `loadQaHistory()` 加载完整结果（含 trace + answer + 图片）
 
 ---
 
@@ -660,7 +697,7 @@ query/
     │   ├── code_executor.py     # 沙箱化 Python 代码执行器
     │   ├── document_processor.py # 文档解析/切片
     │   ├── rag_engine.py        # RAG 核心引擎
-    │   ├── runtime_event_bus.py # [v11 新增] per-run pub-sub 事件总线
+    │   ├── runtime_event_bus.py # [v11 新增] per-run pub-sub 事件总线（Workflow + Generation 双层）
     │   ├── workflow_validator.py # DAG 校验器（六层）
     │   ├── utils.py             # 工具函数 (extract_json)
     │   ├── log_config.py        # JSON 结构化日志
@@ -1136,6 +1173,21 @@ async def run(self, context: AgentContext) -> AgentContext:
 
         if plan and plan.tasks:
             context.plan = plan
+            # 记录 Planner 步骤到 trace（供前端展示）
+            context.steps.append(AgentStep(
+                name="Planner",
+                duration_ms=int((time.time() - plan_start) * 1000),
+                summary=f"生成 {len(plan.tasks)} 节点 DAG",
+            ))
+            # 发射 plan_generated 事件（含 task status，前端 DAG 实时渲染）
+            await context.emit(EventType.PLAN_GENERATED, {
+                "goal": plan.goal,
+                "tasks": [
+                    {"id": t.id, "agent": t.agent, "objective": t.objective,
+                     "depends_on": t.depends_on, "status": t.status.value}
+                    for t in plan.tasks
+                ],
+            })
             await self._execute_plan(context, plan)
 
         # 6. 更新记忆
@@ -1242,18 +1294,19 @@ DAG Runtime 内部:
 ### [v11 修改] SSE 信息流
 
 ```
-前端 POST /qa/ask
-  → Python: {run_id, session_id}
-  → asyncio.create_task(_run_and_emit)
+用户发送问题
+  → POST /qa/ask (Java) → 调 Python /qa/ask → 返回 {run_id}
+  → 前端拿到 run_id
 
-前端 GET /qa/runtime/{run_id}
-  → Agent started/completed → 前端显示进度条
+前端连接 SSE:
+  GET /qa/runtime/{run_id} (Nginx → Python)
+    ← plan_generated: DAG 出现，所有 task pending
+    ← agent_started: task 变为 running（蓝色）
+    ← agent_completed: task 变为 completed（绿色）
+    ← runtime_completed: 关闭 SSE，加载完整结果
 
-前端 GET /qa/stream/{run_id}
-  → TOKEN_CHUNK → 前端逐字渲染 answer
-
-_run_and_emit:
-  orchestrator.run() → _callback_java() → RUNTIME_COMPLETED
+Python 后台执行完:
+  → _callback_java() → Java /qa/callback → 持久化 MySQL + Redis + MinIO
 ```
 
 ---

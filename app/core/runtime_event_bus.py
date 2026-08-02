@@ -42,22 +42,31 @@ class RuntimeEventBus:
 
     def __init__(self):
         self._channels: dict[str, list[asyncio.Queue]] = {}
+        self._history: dict[str, list[RuntimeEvent]] = {}
 
     def create_channel(self, run_id: str):
         """预创建 channel，/qa/ask 中在 create_task 之前调用"""
         if run_id not in self._channels:
             self._channels[run_id] = []
+            self._history[run_id] = []
             logger.debug("[EventBus] channel created: %s", run_id)
 
     def subscribe(self, run_id: str) -> asyncio.Queue:
-        """订阅 run_id 的事件流，返回独立 Queue"""
+        """订阅 run_id 的事件流，返回独立 Queue（包含历史事件）"""
         q: asyncio.Queue = asyncio.Queue()
+        # 先放入历史事件，再加入 subscriber 列表
+        for event in self._history.get(run_id, []):
+            q.put_nowait(event)
         self._channels.setdefault(run_id, []).append(q)
-        logger.debug("[EventBus] subscriber added: %s (total=%d)", run_id, len(self._channels[run_id]))
+        logger.debug("[EventBus] subscriber added: %s (history=%d, total=%d)",
+                     run_id, len(self._history.get(run_id, [])), len(self._channels[run_id]))
         return q
 
     async def publish(self, event: RuntimeEvent):
-        """发布事件到所有 subscriber（fan-out）"""
+        """发布事件到所有 subscriber（fan-out）+ 缓存历史"""
+        # 缓存事件（供迟到的 subscriber 回放）
+        if event.run_id in self._history:
+            self._history[event.run_id].append(event)
         subscribers = self._channels.get(event.run_id, [])
         for q in subscribers:
             await q.put(event)
@@ -66,8 +75,9 @@ class RuntimeEventBus:
                          event.type.value, len(subscribers), event.run_id)
 
     def cleanup(self, run_id: str):
-        """清理 run_id 的所有 subscriber"""
+        """清理 run_id 的所有 subscriber 和历史"""
         self._channels.pop(run_id, None)
+        self._history.pop(run_id, None)
         logger.debug("[EventBus] cleanup: %s", run_id)
 
     @property

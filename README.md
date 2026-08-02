@@ -151,12 +151,13 @@ RuleValidator 做空 answer + 数值一致性检查（支持 95/95%/0.95 normali
 ### 5. SSE 双流架构
 
 ```
-POST /qa/ask → {run_id}
-GET /qa/runtime/{run_id}  → Agent 进度事件（低频）
-GET /qa/answer/{run_id}   → token 增量流（高频，逐字渲染）
+POST /qa/ask → {run_id}                          ← Python 异步返回
+GET /qa/runtime/{run_id}  → Agent 进度事件（低频） ← Nginx 直连 Python
+GET /qa/answer/{run_id}   → token 增量流（高频）   ← Nginx 直连 Python
+POST /qa/callback          ← Python 执行完后回调 Java 持久化
 ```
 
-RuntimeEventBus per-run pub-sub，前端同时接收 Workflow 层状态和 Generation 层 token。
+RuntimeEventBus per-run pub-sub，前端实时接收 DAG 状态变化 + Agent 执行进度。Java /qa/ask 简化为只拿 run_id，持久化通过 /qa/callback 异步完成。
 
 ### 6. CodeAgent 沙箱
 
@@ -181,17 +182,20 @@ Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字�
 | 领域 Agent | 7 个 |
 | MCP 工具 | 6 个 |
 | DAG 校验层 | 6 层 |
-| Docker 服务 | 8 个 |
+| Docker 服务 | 9 个 |
 | 数据库 | MySQL + Redis + ChromaDB |
 | SSE 端点 | 2 个 |
-| API 端点 | 13 个 |
+| API 端点 | 14 个（含 /qa/callback） |
 
 ---
 
 ## 部署架构
 
 ```
-前端(:8080) → Nginx → Java(:8085) → Python(:8000)
+前端(:8080) → Nginx
+                ├── /qa/runtime/* → Python(:8000)  ← SSE 直连
+                ├── /qa/answer/*  → Python(:8000)  ← SSE 直连
+                └── /qa/*         → Java(:8085) → Python(:8000)
                                       ↓
                               Ollama(:11434) Embedding
                               Redis(:6379) 缓存
@@ -247,6 +251,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 实现 DAG Scheduler，支持拓扑排序、异步并行执行、port_bindings 数据流注入以及子图级失败恢复
 - 构建 MCP Tool Runtime，通过标准化 Tool Interface 解耦 Agent 与 RAG、数据分析、代码执行等外部能力
 - 实现两级 Critic 闭环：RuleValidator（确定性规则，<100ms）+ Slim LLM Critic（语义矛盾检测，5-15s），支持精准子图重执行
-- 设计 SSE 双流架构：RuntimeEventBus per-run pub-sub，前端实时接收 Agent 进度和 token 增量流
+- 设计 SSE 双流架构：RuntimeEventBus per-run pub-sub，Nginx SSE 直连 Python 绕过 Java，前端实时接收 DAG 状态和 Agent 执行进度
 - 实现 CodeAgent Sandbox，通过进程隔离、资源限制和模块白名单降低 LLM 生成代码执行风险
 - 优化 LLM 推理管线：Extractor 输出精简（attributes 短语化 + evidence 核心断言），Generator token budget，Critic slim prompt，全链路 Token Metrics

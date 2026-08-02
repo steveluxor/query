@@ -138,16 +138,19 @@
                                 </div>
                             </div>
 
-                            <!-- Agent Trace 时间线 -->
-                            <div class="agent-trace" id="agentTrace">
-                                <div class="trace-empty">
-                                    <div class="trace-empty-icon">&#x1F916;</div>
-                                    <div class="trace-empty-text">输入问题，Agent 将自主规划并执行任务</div>
+                            <!-- 可滚动内容区：聊天 + 实时 trace -->
+                            <div class="main-scroll">
+                                <div class="agent-trace" id="agentTrace">
+                                    <div class="trace-empty">
+                                        <div class="trace-empty-icon">&#x1F916;</div>
+                                        <div class="trace-empty-text">输入问题，Agent 将自主规划并执行任务</div>
+                                    </div>
                                 </div>
                             </div>
 
-                            <!-- 结果工作区 -->
+                            <!-- 结果工作区（固定底部，可拖拽调整高度） -->
                             <div class="result-workspace" id="resultWorkspace" style="display:none;">
+                                <div class="resize-handle" id="resizeHandle"></div>
                                 <div class="result-tabs" id="resultTabs">
                                     <button class="result-tab active" data-tab="answer">回答</button>
                                     <button class="result-tab" data-tab="charts">图表</button>

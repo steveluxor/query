@@ -220,7 +220,7 @@ async def _judge_relevance(query: str, summaries: dict[int, str]) -> set[int]:
     try:
         result = json.loads(response.content)
         return set(result.get("relevant_ids", summaries.keys()))
-    except:
+    except Exception:
         return set(summaries.keys())
 
 

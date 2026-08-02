@@ -118,24 +118,34 @@ public class QaServiceImpl implements QaService {
                         .GET()
                         .build();
 
-                // 使用 ofInputStream + BufferedReader 实现逐行流式转发
-                // BodyHandlers.ofLines() 会缓冲整个响应体，不适合 SSE
                 HttpResponse<java.io.InputStream> response = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofInputStream());
+                log.info("[SSE-{}] Python 连接成功, status={}", streamType, response.statusCode());
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                    String eventType = "message";
+                    String data = null;
+                    int eventCount = 0;
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        if (line.startsWith("data: ")) {
-                            String data = line.substring(6);
+                        if (line.startsWith("event: ")) {
+                            eventType = line.substring(7).trim();
+                        } else if (line.startsWith("data: ")) {
+                            data = line.substring(6);
+                        } else if (line.isEmpty() && data != null) {
+                            eventCount++;
+                            log.info("[SSE-{}] 转发事件 #{}: type={}", streamType, eventCount, eventType);
                             try {
                                 emitter.send(SseEmitter.event()
-                                        .name("message")
+                                        .name(eventType)
                                         .data(data));
                             } catch (Exception e) {
                                 log.warn("[SSE-{}] 转发失败: {}", streamType, e.getMessage());
                                 break;
                             }
+                            eventType = "message";
+                            data = null;
                         }
                     }
+                    log.info("[SSE-{}] 流结束, 共转发 {} 个事件", streamType, eventCount);
                 }
                 emitter.complete();
             } catch (Exception e) {
