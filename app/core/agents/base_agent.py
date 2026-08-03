@@ -21,28 +21,17 @@ class BaseAgent(ABC):
         ...
 
     async def execute(self, context: AgentContext, task_id: str = "", **kwargs) -> AgentResult:
-        """包装 run()，返回 AgentResult（子类可以 override 以提供 outputs/actions）
-
-        Agent 可通过 context 设置以下属性来自报元数据：
-          - _agent_summary: 执行摘要（供前端 Agent Trace 展示）
-          - _agent_tools: 使用的工具列表
-          - _artifacts: 生成的文件产物
-        """
+        """包装 run()，返回 AgentResult（子类可以 override 以提供 outputs/actions）"""
         start = time.time()
         logger.info("[%s] 开始执行 (task=%s)", self.name, task_id or "-")
         try:
             await self.run(context, **kwargs)
             duration = int((time.time() - start) * 1000)
 
-            # 收集 Agent 自报的元数据（向后兼容：未设置则用默认值）
-            summary = getattr(context, '_agent_summary', '')
-            tools_used = getattr(context, '_agent_tools', [])
-            artifacts = getattr(context, '_artifacts', [])
-
             context.steps.append(AgentStep(
                 name=self.name,
                 duration_ms=duration,
-                summary=summary or f"完成，耗时 {duration}ms",
+                summary=f"完成，耗时 {duration}ms",
             ))
             context.add_trace(AgentTrace(
                 task_id=task_id,
@@ -51,17 +40,8 @@ class BaseAgent(ABC):
                 end_time=str(int(time.time() * 1000)),
             ))
 
-            # 清理临时属性，避免污染下一次执行
-            for attr in ('_agent_summary', '_agent_tools', '_artifacts'):
-                if hasattr(context, attr):
-                    delattr(context, attr)
-
             logger.info("[%s] 执行完成，耗时 %dms", self.name, duration)
-            return AgentResult(
-                summary=summary or f"{self.name} 完成",
-                tools_used=tools_used,
-                artifacts=artifacts,
-            )
+            return AgentResult(summary=f"{self.name} 完成")
         except Exception as e:
             duration = int((time.time() - start) * 1000)
             context.steps.append(AgentStep(
@@ -90,14 +70,10 @@ class ControllerAgent(BaseAgent):
             actions = self.parse_actions(context)
             duration = int((time.time() - start) * 1000)
 
-            summary = getattr(context, '_agent_summary', '')
-            tools_used = getattr(context, '_agent_tools', [])
-            artifacts = getattr(context, '_artifacts', [])
-
             context.steps.append(AgentStep(
                 name=self.name,
                 duration_ms=duration,
-                summary=summary or f"完成，{len(actions)} 个 control action，耗时 {duration}ms",
+                summary=f"完成，{len(actions)} 个 control action，耗时 {duration}ms",
             ))
             context.add_trace(AgentTrace(
                 task_id=task_id,
@@ -106,17 +82,8 @@ class ControllerAgent(BaseAgent):
                 end_time=str(int(time.time() * 1000)),
             ))
 
-            for attr in ('_agent_summary', '_agent_tools', '_artifacts'):
-                if hasattr(context, attr):
-                    delattr(context, attr)
-
             logger.info("[%s] Controller 完成，%d actions，耗时 %dms", self.name, len(actions), duration)
-            return AgentResult(
-                actions=actions,
-                summary=summary or f"{self.name} 完成",
-                tools_used=tools_used,
-                artifacts=artifacts,
-            )
+            return AgentResult(actions=actions, summary=f"{self.name} 完成")
         except Exception as e:
             duration = int((time.time() - start) * 1000)
             logger.error("[%s] Controller 执行失败: %s", self.name, e)

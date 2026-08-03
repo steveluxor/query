@@ -95,10 +95,9 @@ class AgentContext:
 
         if not merge_policy:
             merge_policy = self.merge_policies.get(key, "append")
-        return AgentContext._merge_values(values, merge_policy, key)
+        return self._merge_values(values, merge_policy, key)
 
-    @staticmethod
-    def _merge_values(values: list, policy: str, key: str):
+    def _merge_values(self, values: list, policy: str, key: str):
         """通用合并策略 — replace / append / dedup"""
         if policy == "replace":
             return values[-1]
@@ -127,7 +126,7 @@ class AgentContext:
                     merged.extend(v)
 
             if policy == "dedup":
-                dedup_func = self.dedup_key_funcs.get(key) if hasattr(self, 'dedup_key_funcs') else None
+                dedup_func = self.dedup_key_funcs.get(key)
                 seen = set()
                 result = []
                 for item in merged:

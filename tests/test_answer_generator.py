@@ -1,12 +1,27 @@
 """AnswerGenerator 单元测试 — knowledge_objects 优先级 + 降级"""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.core.agent_context import AgentContext
 from app.core.generator.answer_generator import AnswerGenerator
 from app.models.data_types import KnowledgeObject, Evidence, AnalysisResult, Calculation
+
+
+class _AsyncChunks:
+    """模拟 LLM astream 输出：逐块产出带 .content 的对象"""
+    def __init__(self, chunks):
+        self._it = iter(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return type("Chunk", (), {"content": next(self._it)})()
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 @pytest.fixture
@@ -22,7 +37,7 @@ def context():
 @pytest.fixture
 def mock_llm():
     m = MagicMock()
-    m.ainvoke = AsyncMock(return_value=MagicMock(content="生成结果"))
+    m.astream = MagicMock(return_value=_AsyncChunks(["生成结果"]))
     return m
 
 
@@ -30,7 +45,7 @@ def mock_llm():
 async def test_generate_with_knowledge_objects(agent, context, mock_llm):
     """knowledge_objects 优先于 evidence"""
     agent.llm = mock_llm
-    mock_llm.ainvoke.return_value = MagicMock(content="实验一和实验二存在差异")
+    mock_llm.astream.return_value = _AsyncChunks(["实验一和实验二存在差异"])
     kos = [
         KnowledgeObject(topic="实验一", attributes={"温度": "25°C"}, source="exp1.docx"),
         KnowledgeObject(topic="实验二", attributes={"温度": "30°C"}, source="exp2.docx"),
@@ -46,7 +61,7 @@ async def test_generate_with_knowledge_objects(agent, context, mock_llm):
 async def test_generate_with_evidence_fallback(agent, context, mock_llm):
     """无 knowledge_objects 时使用 evidence"""
     agent.llm = mock_llm
-    mock_llm.ainvoke.return_value = MagicMock(content="销售额为5000")
+    mock_llm.astream.return_value = _AsyncChunks(["销售额为5000"])
     evs = [Evidence(statement="销售额5000", source="sales.xlsx", evidence_type="text")]
 
     await agent.run(context, structured_knowledge=[], evidence_list=evs, analysis_result=None, source_meta=[])
@@ -59,7 +74,7 @@ async def test_generate_with_evidence_fallback(agent, context, mock_llm):
 async def test_fallback_answer_on_llm_failure(agent, context, mock_llm):
     """LLM 失败时使用 evidence 降级"""
     agent.llm = mock_llm
-    mock_llm.ainvoke.side_effect = Exception("LLM error")
+    mock_llm.astream.side_effect = Exception("LLM error")
     evs = [Evidence(statement="事实1", source="doc.pdf", evidence_type="text")]
 
     await agent.run(context, structured_knowledge=[], evidence_list=evs, analysis_result=None, source_meta=[])
@@ -72,7 +87,7 @@ async def test_fallback_answer_on_llm_failure(agent, context, mock_llm):
 async def test_fallback_answer_no_evidence(agent, context, mock_llm):
     """无证据时返回服务不可用"""
     agent.llm = mock_llm
-    mock_llm.ainvoke.side_effect = Exception("LLM error")
+    mock_llm.astream.side_effect = Exception("LLM error")
 
     await agent.run(context, structured_knowledge=[], evidence_list=[], analysis_result=None, source_meta=[])
 

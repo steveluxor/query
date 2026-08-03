@@ -1,13 +1,18 @@
 # Query - 智能知识问答系统 (Python AI 服务)
 
+> ⚠️ **本文档描述的是 v3 架构（Coordinator→Knowledge→Generate→Critic），已过时。**
+> 当前架构为 **v11 Planner + DAG Multi-Agent Runtime**（retrieval/extractor/analysis/code/generator/critic/chat + Java SSE 透传），
+> 完整架构见 [docs/archive/CLAUDE_MultiAgent_v11.md](docs/archive/CLAUDE_MultiAgent_v11.md)。
+> 下文"Multi-Agent 信息流 / 项目结构 / 文件与函数详解"等章节仅作历史参考，实际以 v11 文档和代码为准。
+
 ## 系统架构
 
 本项目是一个 **基于 Multi-Agent 的智能知识问答系统**，采用 RAG (Retrieval-Augmented Generation) 技术，通过 MCP (Model Context Protocol) 协议实现工具调用。
 
 | 组件 | 路径 | 技术栈 | 端口 |
 |------|------|--------|------|
-| 前端 | `D:\DOWNLOAD\nginx-query` | Nginx + 原生 HTML/CSS/JS | :8080 |
-| Java 后端 | `D:\IntelliJ IDEA 2025.1.3\project\Query` | Spring Boot 4.0.6 + MyBatis | :8085 |
+| 前端 | `nginx/html`（仓库内，唯一副本） | Nginx + 原生 HTML/CSS/JS | :8080 |
+| Java 后端 | `java`（仓库内，唯一副本） | Spring Boot + MyBatis | :8085 |
 | Python AI 服务 | 本项目 (`D:\DOWNLOAD\pycharm\query`) | FastAPI + LangChain + ChromaDB | :8000 |
 
 **请求流向：** 前端(:8080) → Nginx 反向代理 → Java 后端(:8085) → Python AI 服务(:8000)

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 
 from app.core.actions import ActionRegistry
@@ -108,12 +109,8 @@ class AgentOrchestrator:
                 })
                 await self._execute_plan(context, plan)
 
-            # 6. 更新记忆
-            if context.session_id:
-                self._update_memory(context)
-
         finally:
-            # 确保偏好检测后台任务完成
+            # 确保偏好检测后台任务完成（所有路径，避免遗留挂起 task）
             if pref_task:
                 try:
                     await pref_task
@@ -121,6 +118,10 @@ class AgentOrchestrator:
                     logger.warning("偏好检测失败（不影响当前回答）: %s", e)
             # 7. 清理 MCP session 状态
             await self.mcp_client.cleanup_session(context.mcp_session_id)
+
+        # 6. 更新记忆：串行化在偏好检测完成之后，消除并发竞态；to_thread 避免同步 LLM 阻塞事件循环
+        if context.session_id:
+            await asyncio.to_thread(self._update_memory, context)
 
         return context
 
@@ -130,6 +131,7 @@ class AgentOrchestrator:
         """执行 TaskGraph — 支持 Controller retry 导致的子图重新执行"""
         original_question = context.question
         max_iterations = 10  # 防止 Controller 死循环
+        plan_task_map = {t.id: t for t in plan.tasks}
 
         # 从 registry 收集所有 merge_policy 和 dedup_key_func，设置到 context
         context.merge_policies = {}
@@ -162,11 +164,20 @@ class AgentOrchestrator:
                     return_exceptions=True,
                 )
                 for task, result in zip(ready, results):
+                    pending.remove(task)
                     if isinstance(result, Exception):
                         task.status = TaskStatus.FAILED
                         task.summary = f"失败: {result}"
-                    completed_ids.add(task.id)
-                    pending.remove(task)
+                        # 失败 → 跳过所有下游任务，避免以空输入继续执行产生"自信但错误"的回答
+                        for desc_id in plan.get_descendants(task.id):
+                            desc = plan_task_map.get(desc_id)
+                            if desc and desc.status in (TaskStatus.PENDING, TaskStatus.RETRYING):
+                                desc.status = TaskStatus.SKIPPED
+                                desc.summary = f"上游 {task.id} 失败，已跳过"
+                                if desc in pending:
+                                    pending.remove(desc)
+                    else:
+                        completed_ids.add(task.id)
 
             # 如果全部完成（没有 Controller 触发 retry），退出
             remaining = [t for t in plan.tasks if t.status in (TaskStatus.PENDING, TaskStatus.RETRYING)]
@@ -455,10 +466,12 @@ class AgentOrchestrator:
         # === 规则 1：数值问题强制包含 analysis ===
         sum_keywords = ("花了多少钱", "总共", "合计", "总金额", "总和", "求和", "sum", "total",
                         "花了多少", "一共")
-        rank_keywords = ("最贵", "最便宜", "排名", "排序", "第", "最高", "最低", "rank", "top")
+        rank_keywords = ("最贵", "最便宜", "排名", "排序", "最高", "最低", "rank", "top")
+        # 裸 "第" 会把 "第二个文件"/"第一季度" 误判为排名，仅当 "第N高/低/名/贵/便宜/位" 才算排名
+        rank_patterns = (r"第\s*\d+\s*(高|低|名|贵|便宜|位)",)
 
         needs_sum = any(kw in lower_q for kw in sum_keywords)
-        needs_rank = any(kw in lower_q for kw in rank_keywords)
+        needs_rank = any(kw in lower_q for kw in rank_keywords) or any(re.search(p, lower_q) for p in rank_patterns)
 
         if (needs_sum or needs_rank) and not has_analysis:
             logger.info("[Orchestrator] 检测到数值问题但无 analysis，自动修正 plan")

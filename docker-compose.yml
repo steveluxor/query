@@ -124,6 +124,7 @@ services:
       VECTOR_STORE_PATH: /app/chroma_db
       REDIS_HOST: redis
       REDIS_PASSWORD: sty01725
+      CALLBACK_TOKEN: ${CALLBACK_TOKEN:-}
       TZ: Asia/Shanghai
     volumes:
       - chroma-data:/app/chroma_db
@@ -178,6 +179,7 @@ services:
       - "8085:8085"
     environment:
       SPRING_PROFILES_ACTIVE: docker
+      AI_SERVICE_CALLBACK_TOKEN: ${CALLBACK_TOKEN:-}
       TZ: Asia/Shanghai
     depends_on:
       mysql:

@@ -24,6 +24,14 @@ llm = None
 session_mgr = SessionManager()
 
 
+def _get_search_ctx(session, task_id: str):
+    """获取 task 隔离的 SearchContext：优先该 task 自己的搜索上下文，
+    否则回退共享 search_ctx（链式场景：analysis 复用上游 retrieval 的结果）。"""
+    if task_id and session.search_contexts.get(task_id):
+        return session.search_contexts[task_id]
+    return session.search_ctx
+
+
 @mcp.tool()
 async def _create_session(session_id: str) -> str:
     """内部 tool：创建 MCP session。由 MCPClient.create_session() 调用，不暴露给 Agent。"""
@@ -70,44 +78,46 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
     }
 
     # 摘要过滤：用 LLM 判断文档相关性
+    # 旧逻辑依赖 "[文件: ...]" header 行匹配 doc_id，但 _execute_search 实际输出 "[{file_name} / {sheet}]"，
+    # 导致 doc_id 提取几乎总为空，过滤块形同虚设。改为直接从搜索结果 chunk 的 metadata 提取 document_id。
     if summary_cache and raw_result:
         try:
-            data_lines = raw_result.strip().split("\n")
-            doc_ids = set()
-            for line in data_lines:
-                if line.startswith("[文件:") and "]" in line:
-                    for did in session.document_ids:
-                        if str(did) in line:
-                            doc_ids.add(did)
+            chunks = ctx.last_search_chunks or []
+            doc_ids = {
+                doc.metadata.get("document_id")
+                for doc, _ in chunks
+                if doc.metadata.get("document_id") is not None
+            }
 
             if doc_ids:
                 summaries = await summary_cache.get_batch(list(doc_ids))
                 if summaries:
                     relevant_ids = await _judge_relevance(query, summaries)
-                    filtered_lines = []
-                    skip_next = False
-                    for line in data_lines:
-                        if line.startswith("[文件:") and "]" in line:
-                            matched_id = None
-                            for did in session.document_ids:
-                                if str(did) in line:
-                                    matched_id = did
-                                    break
-                            if matched_id and matched_id not in relevant_ids:
-                                skip_next = True
-                                continue
-                            else:
-                                skip_next = False
-                        elif skip_next:
-                            continue
-                        filtered_lines.append(line)
-
-                    if filtered_lines:
-                        result["data"] = "\n".join(filtered_lines)
+                    filtered_chunks = [
+                        (doc, score) for doc, score in chunks
+                        if doc.metadata.get("document_id") in relevant_ids
+                    ]
+                    if filtered_chunks and len(filtered_chunks) != len(chunks):
+                        # 按与 _execute_search 一致的格式重建过滤后的文本
+                        context_parts = []
+                        for doc, _ in filtered_chunks:
+                            source_name = doc.metadata.get("file_name", "未知文档")
+                            sheet_name = doc.metadata.get("sheet_name")
+                            label = f"{source_name} / {sheet_name}" if sheet_name else source_name
+                            context_parts.append(f"[{label}]\n{doc.page_content}")
+                        filtered_text = "检索到以下相关内容：\n\n" + "\n\n".join(context_parts)
+                        # 保留数据不完整提示（read_all_rows 触发条件）
+                        if "只显示了部分数据" in raw_result:
+                            filtered_text += (
+                                "\n\n【重要】以上只显示了部分数据。"
+                                "你必须立即调用 read_all_rows 工具获取完整数据，不要跳过此步骤。"
+                                "在获取完整数据之前，不要生成最终回答。"
+                            )
+                        result["data"] = filtered_text
                         result["filtered_by_summary"] = True
                         logger.info("[MCP] 摘要过滤: %d -> %d 个文档", len(doc_ids), len(relevant_ids))
         except Exception as e:
-            logger.warning("[MCP] 摘要过滤失败，使用原始结果: %s", e)
+            logger.error("[MCP] 摘要过滤失败，使用原始结果: %s", e, exc_info=True)
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -141,7 +151,7 @@ async def calculate_sum(session_id: str, key_name: str, row_filter: str = "", co
                 session_id[:8], task_id or "-", key_name, row_filter, content_filter)
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_ctx
+    ctx = _get_search_ctx(session, task_id)
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 
@@ -156,7 +166,7 @@ async def calculate_rank(session_id: str, key_name: str, ascending: bool, positi
                 session_id[:8], task_id or "-", key_name, ascending, position)
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_ctx
+    ctx = _get_search_ctx(session, task_id)
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 
@@ -169,7 +179,7 @@ async def read_all_rows(session_id: str, task_id: str = "") -> str:
     logger.info("[MCP] read_all_rows (session=%s, task=%s)", session_id[:8], task_id or "-")
 
     session = await session_mgr.get(session_id)
-    ctx = session.search_ctx
+    ctx = _get_search_ctx(session, task_id)
     if not ctx:
         return "请先调用 search_documents 搜索数据。"
 

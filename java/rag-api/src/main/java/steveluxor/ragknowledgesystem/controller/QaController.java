@@ -2,7 +2,10 @@ package steveluxor.ragknowledgesystem.controller;
 import java.lang.Long;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import steveluxor.ragknowledgesystem.common.CurrentUser;
@@ -19,6 +22,9 @@ import java.util.Map;
 public class QaController {
 
     private final QaService qaService;
+
+    @Value("${ai-service.callback-token:}")
+    private String callbackToken;
 
     @Autowired
     public QaController(QaService qaService) {
@@ -37,16 +43,16 @@ public class QaController {
         return qaService.streamRuntime(runId);
     }
 
-    @GetMapping(value = "/answer/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamAnswer(@PathVariable("runId") String runId) {
-        log.info("SSE Answer 连接: runId={}", runId);
-        return qaService.streamAnswer(runId);
-    }
-
     @PostMapping("/callback")
-    public Result callback(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<?> callback(
+            @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "X-Callback-Token", defaultValue = "") String token) {
+        if (!callbackToken.isBlank() && !callbackToken.equals(token)) {
+            log.warn("Python Callback 鉴权失败: token 不匹配");
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Result.fail("callback token 校验失败"));
+        }
         log.info("Python Callback: sessionId={}", body.get("session_id"));
-        return qaService.handleCallback(body);
+        return ResponseEntity.ok(qaService.handleCallback(body));
     }
 
     @GetMapping("/sessions")
@@ -80,7 +86,7 @@ public class QaController {
     @DeleteMapping("/history/batch")
     public Result deleteBatch(@RequestBody List<Long> ids) {
         Long userId = CurrentUser.get();
-        log.info("批量删除问答历史: ids={}, userId={}", ids, ids);
+        log.info("批量删除问答历史: ids={}, userId={}", ids, userId);
         return qaService.deleteBatch(ids, userId);
     }
 

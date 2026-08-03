@@ -1,11 +1,9 @@
-import json
 import logging
 
 from langchain.agents import create_agent
 
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext
-from app.core.rag_engine import RAGEngine
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
 from app.core.prompts.prompt_manager import PromptManager
@@ -67,7 +65,8 @@ class AnalysisAgent(BaseAgent):
 
         except Exception as e:
             logger.error("[Analysis] Agent 执行失败: %s", e)
-            context.set_output("analysis", AnalysisResult(), producer="analysis")
+            # 失败即 FAILED，交由 Orchestrator 跳过下游，避免空 AnalysisResult 产生错误回答
+            raise
 
         return context
 

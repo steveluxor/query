@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
     # Java 后端
     java_base_url: str = "http://localhost:8085"
+    # /qa/callback 共享密钥（与 Java 侧 ai-service.callback-token 保持一致）
+    callback_token: str = ""
 
     # Redis
     redis_host: str = "localhost"

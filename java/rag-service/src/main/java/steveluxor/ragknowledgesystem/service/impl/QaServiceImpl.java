@@ -3,6 +3,7 @@ package steveluxor.ragknowledgesystem.service.impl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -36,15 +37,18 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import org.springframework.util.DigestUtils;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.concurrent.CompletableFuture;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -55,8 +59,10 @@ public class QaServiceImpl implements QaService {
     private static final String ASK_PATH = "/qa/ask";
     private static final Duration TIMEOUT = Duration.ofSeconds(300);
     private static final int TITLE_MAX_LENGTH = 50;
+    private static final long HEARTBEAT_INTERVAL_MS = 15_000L;
 
     private final String pythonBaseUrl;
+    private final String callbackToken;
     private final QaHistoryMapper qaHistoryMapper;
     private final QaSessionMapper qaSessionMapper;
     private final DocumentMapper documentMapper;
@@ -65,6 +71,9 @@ public class QaServiceImpl implements QaService {
     private final HttpClient httpClient;
     private final MinioClient minioClient;
     private final String bucketName;
+    // 专用有界线程池，避免阻塞公共 ForkJoinPool 线程
+    private final ExecutorService sseExecutor;
+    private final ScheduledExecutorService heartbeatScheduler;
 
     @Autowired
     public QaServiceImpl(
@@ -74,7 +83,8 @@ public class QaServiceImpl implements QaService {
             StringRedisTemplate redisTemplate,
             MinioClient minioClient,
             @org.springframework.beans.factory.annotation.Value("${minio.bucket-name}") String bucketName,
-            @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
+            @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl,
+            @org.springframework.beans.factory.annotation.Value("${ai-service.callback-token:}") String callbackToken) {
         this.qaHistoryMapper = qaHistoryMapper;
         this.qaSessionMapper = qaSessionMapper;
         this.documentMapper = documentMapper;
@@ -82,6 +92,9 @@ public class QaServiceImpl implements QaService {
         this.minioClient = minioClient;
         this.bucketName = bucketName;
         this.pythonBaseUrl = pythonBaseUrl;
+        this.callbackToken = callbackToken;
+        this.sseExecutor = Executors.newCachedThreadPool();
+        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
@@ -91,6 +104,13 @@ public class QaServiceImpl implements QaService {
                 .build();
     }
 
+    @PreDestroy
+    public void shutdown() {
+        sseExecutor.shutdownNow();
+        heartbeatScheduler.shutdownNow();
+        log.info("[SSE] SSE executor 与心跳调度器已关闭");
+    }
+
     // ==================== SSE 透传 ====================
 
     @Override
@@ -98,18 +118,24 @@ public class QaServiceImpl implements QaService {
         return proxySse(pythonBaseUrl + "/qa/runtime/" + runId, "runtime", runId);
     }
 
-    @Override
-    public SseEmitter streamAnswer(String runId) {
-        return proxySse(pythonBaseUrl + "/qa/answer/" + runId, "answer", runId);
-    }
-
     /**
      * 通用 SSE 透传：连接 Python SSE 端点，逐行转发给前端
+     * - 专用线程池执行，不占公共 ForkJoinPool
+     * - 校验 Python 状态码：非 200 时发一条 runtime_error 事件，不把错误体当 SSE 转发
+     * - 心跳：15s 定时发 comment 注释，避免长 Planner 阶段 nginx/前端提前断开
      */
     private SseEmitter proxySse(String pythonUrl, String streamType, String runId) {
         SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
 
-        CompletableFuture.runAsync(() -> {
+        ScheduledFuture<?> heartbeat = heartbeatScheduler.scheduleAtFixedRate(() -> {
+            try {
+                emitter.send(SseEmitter.event().comment("ping"));
+            } catch (Exception ignored) {
+                // 发送失败说明连接已断开，onCompletion/onError 会取消心跳
+            }
+        }, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        sseExecutor.execute(() -> {
             try {
                 HttpRequest httpReq = HttpRequest.newBuilder()
                         .uri(URI.create(pythonUrl))
@@ -119,7 +145,31 @@ public class QaServiceImpl implements QaService {
                         .build();
 
                 HttpResponse<java.io.InputStream> response = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofInputStream());
-                log.info("[SSE-{}] Python 连接成功, status={}", streamType, response.statusCode());
+                int statusCode = response.statusCode();
+                log.info("[SSE-{}] Python 连接成功, status={}", streamType, statusCode);
+
+                if (statusCode != 200) {
+                    // 校验状态码：向前端透传 runtime_error，而非把 Python 错误体当 SSE 转发
+                    String errorBody = readErrorBody(response);
+                    String errorMsg = "AI 服务返回错误 (HTTP " + statusCode + ")";
+                    if (!errorBody.isBlank()) {
+                        errorMsg += ": " + errorBody;
+                    }
+                    log.error("[SSE-{}] Python 返回非 200: runId={}, status={}", streamType, runId, statusCode);
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("type", "runtime_error");
+                    payload.put("data", Map.of("error", errorMsg));
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .name("runtime_error")
+                                .data(objectMapper.writeValueAsString(payload)));
+                    } catch (Exception sendEx) {
+                        log.warn("[SSE-{}] 发送 runtime_error 失败: {}", streamType, sendEx.getMessage());
+                    }
+                    emitter.completeWithError(new RuntimeException("Python SSE 返回状态码 " + statusCode));
+                    return;
+                }
+
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
                     String eventType = "message";
                     String data = null;
@@ -154,13 +204,34 @@ public class QaServiceImpl implements QaService {
                     emitter.completeWithError(e);
                 } catch (Exception ignored) {
                 }
+            } finally {
+                heartbeat.cancel(false);
             }
         });
 
-        emitter.onTimeout(() -> log.warn("[SSE-{}] 超时: runId={}", streamType, runId));
-        emitter.onError(t -> log.warn("[SSE-{}] 错误: runId={}, error={}", streamType, runId, t.getMessage()));
+        emitter.onTimeout(() -> {
+            log.warn("[SSE-{}] 超时: runId={}", streamType, runId);
+            heartbeat.cancel(false);
+        });
+        emitter.onError(t -> {
+            log.warn("[SSE-{}] 错误: runId={}, error={}", streamType, runId, t.getMessage());
+            heartbeat.cancel(false);
+        });
+        emitter.onCompletion(() -> heartbeat.cancel(false));
 
         return emitter;
+    }
+
+    /**
+     * 读取 Python 非 200 响应的错误体（最多 20 行）
+     */
+    private String readErrorBody(HttpResponse<java.io.InputStream> response) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+            return reader.lines().limit(20).collect(Collectors.joining("\n"));
+        } catch (Exception e) {
+            log.warn("[SSE] 读取错误体失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     // ==================== Python Callback 持久化 ====================
@@ -463,6 +534,8 @@ public class QaServiceImpl implements QaService {
         }
         deleteMinioImages(history);
         qaHistoryMapper.deleteById(id);
+        // 清除该记录所属 session 的 Redis 缓存，避免前端 history() 命中已删记录
+        purgeSessionCache(history.getSessionId());
         return Result.ok();
     }
 
@@ -477,6 +550,12 @@ public class QaServiceImpl implements QaService {
                 .collect(Collectors.toList());
         histories.forEach(this::deleteMinioImages);
         qaHistoryMapper.deleteBatch(ids, userId);
+        // 清除受影响 session 的 Redis 缓存
+        histories.stream()
+                .map(QaHistory::getSessionId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .forEach(this::purgeSessionCache);
         return Result.ok();
     }
 
@@ -495,14 +574,23 @@ public class QaServiceImpl implements QaService {
         qaSessionMapper.deleteById(sessionId);
 
         // 清除 Redis 中的持久化记忆
-        String sessionIdStr = String.valueOf(sessionId);
-        redisTemplate.delete(QA_MEMORY_PREFIX + sessionIdStr);
-        redisTemplate.delete(QA_HISTORY_PREFIX + sessionIdStr);
-        redisTemplate.delete(QA_SESSION_HISTORY_PREFIX + sessionIdStr);
-        log.info("Redis 记忆已清除: sessionId={}", sessionIdStr);
+        purgeSessionCache(sessionId);
 
         log.info("删除会话及历史: sessionId={}, userId={}", sessionId, userId);
         return Result.ok();
+    }
+
+    /**
+     * 清除 session 在 Redis 中的三类缓存（持久化记忆 / 历史 / 会话历史），
+     * 避免删除后前端 history() 命中缓存看到已删记录。
+     */
+    private void purgeSessionCache(Long sessionId) {
+        if (sessionId == null) return;
+        String sid = String.valueOf(sessionId);
+        redisTemplate.delete(QA_MEMORY_PREFIX + sid);
+        redisTemplate.delete(QA_HISTORY_PREFIX + sid);
+        redisTemplate.delete(QA_SESSION_HISTORY_PREFIX + sid);
+        log.info("Redis 缓存已清除: sessionId={}", sid);
     }
 
     /**

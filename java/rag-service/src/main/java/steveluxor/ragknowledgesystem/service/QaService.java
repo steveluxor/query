@@ -12,8 +12,6 @@ public interface QaService {
 
     SseEmitter streamRuntime(String runId);
 
-    SseEmitter streamAnswer(String runId);
-
     Result handleCallback(Map<String, Object> body);
 
     Result getSessions();

@@ -38,7 +38,8 @@ class SessionMemory:
     last_accessed: float = 0.0
     _dirty: bool = True  # 初始或数据变更后为 True，to_dict 后重置
     _preferences_dirty: bool = False  # preferences 变化时置 True，供 Java 决定是否写库
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    # RLock：update()/update_preferences() 跨线程读写同一 SessionMemory，允许嵌套持锁
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 class AgentMemory:
@@ -209,40 +210,56 @@ class AgentMemory:
         """更新记忆：里程碑摘要 + 事实提取 + 偏好检测"""
         memory = self.get_or_create(session_id)
 
-        # 重建模式下 turn_count 已累加，无需再加
-        if memory.turn_count == 0:
-            memory.turn_count = 1
-        else:
-            memory.turn_count += 1
+        # 同一 session 的并发请求可能同时走到 update()，统一持 memory.lock 保证原子性
+        with memory.lock:
+            # 重建模式下 turn_count 已累加，无需再加
+            if memory.turn_count == 0:
+                memory.turn_count = 1
+            else:
+                memory.turn_count += 1
 
-        question = turn.get("question", "")
-        answer = turn.get("answer", "")
+            question = turn.get("question", "")
+            answer = turn.get("answer", "")
 
-        # 1. 里程碑摘要
-        self._compress_summary(memory, question, answer)
+            # 1. 里程碑摘要
+            self._compress_summary(memory, question, answer)
 
-        # 3. 从 tools_called 提取关键事实（所有工具名都写入，不区分搜索/计算）
-        new_facts = turn.get("tools_called", [])
-        existing_texts = {f.text for f in memory.facts}
-        for fact_text in new_facts:
-            if fact_text not in existing_texts:
-                memory.facts.append(Fact(text=fact_text, turn_number=memory.turn_count))
-                existing_texts.add(fact_text)
-                memory._dirty = True
-                logger.info("AgentMemory 新事实: %s", fact_text)
+            # 3. 从 tools_called 提取关键事实（所有工具名都写入，不区分搜索/计算）
+            new_facts = turn.get("tools_called", [])
+            existing_texts = {f.text for f in memory.facts}
+            for fact_text in new_facts:
+                if fact_text not in existing_texts:
+                    memory.facts.append(Fact(text=fact_text, turn_number=memory.turn_count))
+                    existing_texts.add(fact_text)
+                    memory._dirty = True
+                    logger.info("AgentMemory 新事实: %s", fact_text)
 
-        # 3b. 记录查询涉及的文档
-        doc_facts = self._extract_doc_facts(turn)
-        for fact_text in doc_facts:
-            if fact_text not in existing_texts:
-                memory.facts.append(Fact(text=fact_text, turn_number=memory.turn_count))
-                existing_texts.add(fact_text)
-                memory._dirty = True
-                logger.info("AgentMemory 文档事实: %s", fact_text)
+            # 3b. 记录查询涉及的文档
+            doc_facts = self._extract_doc_facts(turn)
+            for fact_text in doc_facts:
+                if fact_text not in existing_texts:
+                    memory.facts.append(Fact(text=fact_text, turn_number=memory.turn_count))
+                    existing_texts.add(fact_text)
+                    memory._dirty = True
+                    logger.info("AgentMemory 文档事实: %s", fact_text)
 
-        # 4. fact 裁剪
-        if len(memory.facts) >= self.FACT_PRUNE_TRIGGER:
-            self._compress_old_facts(memory)
+            # 4. fact 裁剪
+            if len(memory.facts) >= self.FACT_PRUNE_TRIGGER:
+                self._compress_old_facts(memory)
+
+    def mark_synced(self, session_id: str) -> None:
+        """Java 成功持久化（写 Redis/DB）后调用，清除 dirty 标记。
+
+        之前 dirty 只由 from_dict（Redis 加载）清除，进程内置 True 后永不回 False，
+        导致每轮 preferences_dirty=True 都被 Java 重写 DB preferences。
+        """
+        with self._lock:
+            memory = self._sessions.get(session_id)
+        if not memory:
+            return
+        with memory.lock:
+            memory._dirty = False
+            memory._preferences_dirty = False
 
     def update_preferences(self, session_id: str, question: str) -> None:
         """独立的偏好检测方法，供 qa.py 与主生成 LLM 并行调用"""
@@ -259,9 +276,10 @@ class AgentMemory:
         memory = self._sessions.get(session_id)
         if not memory:
             return
-        memory.recent_history.append({"question": question, "answer": answer, "is_agg": is_agg})
-        if len(memory.recent_history) > 5:
-            memory.recent_history = memory.recent_history[-5:]
+        with memory.lock:
+            memory.recent_history.append({"question": question, "answer": answer, "is_agg": is_agg})
+            if len(memory.recent_history) > 5:
+                memory.recent_history = memory.recent_history[-5:]
 
     def format_context(self, session_id: str) -> str:
         """将记忆格式化为文本块，供 system prompt 注入
@@ -382,12 +400,13 @@ class AgentMemory:
                     start_turn=1, end_turn=memory.turn_count,
                 ))
                 if new_prefs:
-                    for k, v in new_prefs.items():
-                        if v is None:
-                            memory.preferences.pop(k, None)
-                        else:
-                            memory.preferences[k] = v
-                    memory._preferences_dirty = True
+                    with memory.lock:
+                        for k, v in new_prefs.items():
+                            if v is None:
+                                memory.preferences.pop(k, None)
+                            else:
+                                memory.preferences[k] = v
+                        memory._preferences_dirty = True
                     logger.info("AgentMemory 首轮 LLM 偏好提取: %s", new_prefs)
                 for fact_text in new_facts:
                     memory.facts.append(Fact(text=fact_text, turn_number=memory.turn_count))
@@ -534,7 +553,8 @@ class AgentMemory:
     def _check_preference_changes(self, memory: SessionMemory, question: str) -> None:
         """LLM 判断本轮是否有偏好变化（新增/修改/删除），每轮调用"""
         llm = self._summary_llm
-        prefs_text = json.dumps(memory.preferences, ensure_ascii=False) if memory.preferences else "无"
+        with memory.lock:
+            prefs_text = json.dumps(memory.preferences, ensure_ascii=False) if memory.preferences else "无"
         prompt = (
             '判断用户的问题是否表达了偏好变化（新增、修改或取消已有偏好）。\n\n'
             f'当前已有偏好：{prefs_text}\n\n'

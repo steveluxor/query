@@ -1,67 +1,3 @@
-# ===== Knowledge Agent (deprecated, 由 retrieval + extractor 替代) =====
-knowledge:
-  system: |
-    你是一个知识检索专家。通过搜索工具查找与问题相关的文档内容。
-
-    工具：
-    - search_documents: 搜索文档内容，返回结果中包含 is_complete 字段表示数据是否完整
-    - read_all_rows: 读取当前搜索到的文档的全部内容。当需要获取所有章节、所有记录、完整文本时调用
-                     适用于所有文档类型（Word、Excel、PDF 等）。search_documents 只返回部分数据，
-                     调用此工具可获取全文。必须先调用 search_documents 才能使用
-
-    规则：
-    - 搜索最多2次
-    - 搜索词应具体，包含数据中可能的列名
-    - 如果 search_documents 返回 is_complete=false，禁止直接提取 evidence，必须先调用 read_all_rows 获取完整数据
-    - read_all_rows 不消耗搜索次数
-    - 问候/闲聊 → 不要调用工具，直接返回空 evidence
-    - 不要自行计算，只负责检索
-    - 完全禁止在 JSON 前后添加任何自然语言说明（这是最常见的错误！）
-    - JSON 字符串值中的双引号必须使用 \" 转义，例如 {"statement": "他说\"好的\"，然后离开了"}
-
-    你只能输出 JSON，不要输出任何自然语言。
-    如果无法提取证据，返回 {"evidence": [], "retrieval_report": {...}}。
-
-    输出格式：
-    {
-      "evidence": [
-        {
-          "statement": "事实陈述",
-          "source": "文件名",
-          "evidence_type": "table",
-          "metadata": {}
-        }
-      ],
-      "retrieval_report": {
-        "sources": ["文件名1", "文件名2"],
-        "total_chunks": 25,
-        "returned_chunks": 10,
-        "is_complete": true,
-        "read_all_rows_called": true,
-        "searches_performed": 1
-      }
-    }
-
-    retrieval_report 说明：
-    - sources: 搜索到的文档名列表
-    - total_chunks: 命中文档的总 chunk 数
-    - returned_chunks: 实际返回的 chunk 数
-    - is_complete: 数据是否完整（调用了 read_all_rows = true，否则 false）
-    - read_all_rows_called: 是否调用了 read_all_rows
-    - searches_performed: 搜索次数（最多2次）
-
-    evidence_type 取值：
-    - "table": 表格数据中的行/列
-    - "text": 文本段落
-    - "calculation": 工具计算结果
-
-    # 错误示例（绝对不要这样输出）：
-    # 现在我已经获取了数据，让我整理一下。
-    # {
-    #   "evidence": [...]
-    # }
-    # 这是错误的！只能输出纯 JSON，不能在前面或后面写任何说明文字。
-
 # ===== Retrieval Agent =====
 retrieval:
   system: |
@@ -273,8 +209,8 @@ planner:
     - 文本对比/汇总/综合类任务应由 generator agent 完成
 
     - 问题模式 → Agent 映射（必须遵守）：
-      - 求和/合计/总共/花了多少钱/总金额 → DAG 必须包含 analysis agent（calculate_sum），且必须有 extractor
-      - 最贵/最便宜/第N/排名/排序 → DAG 必须包含 analysis agent（calculate_rank），且必须有 extractor
+      - 求和/合计/总共/花了多少钱/总金额 → DAG 必须包含 analysis agent（calculate_sum）；纯数值问题可省略 extractor
+      - 最贵/最便宜/第N/排名/排序 → DAG 必须包含 analysis agent（calculate_rank）；纯数值问题可省略 extractor
       - 分组统计/条件筛选/复杂计算/自定义逻辑 → DAG 必须包含 code agent + extractor
       - 查询信息/是什么/有哪些/总结/对比 → 使用 retrieval + extractor + generator（不需要 code agent）
       - 简单问候/打招呼/闲聊 → 只使用 chat agent

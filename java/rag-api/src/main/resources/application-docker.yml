@@ -13,3 +13,4 @@ minio:
 
 ai-service:
   python-base-url: http://python-ai:8000
+  callback-token: ${AI_SERVICE_CALLBACK_TOKEN:}

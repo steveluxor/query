@@ -2,8 +2,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from langchain_core.tools import tool
-
 from app.config import settings
 from app.core.infra.vector_store import VectorStore
 
@@ -18,21 +16,7 @@ class SearchContext:
     last_search_all_chunks: list = field(default_factory=list)
     last_search_sources: list = field(default_factory=list)
     last_search_query: str = ""
-    has_aggregation: bool = False
     search_count: int = 0
-    agg_count: int = 0
-    document_ids: list[int] | None = None
-    tools_called: list[str] = field(default_factory=list)
-
-
-@dataclass
-class AnalysisContext:
-    """计算上下文（Analysis Agent 使用），接收搜索结果作为输入"""
-    chunks: list = field(default_factory=list)
-    filtered: list = field(default_factory=list)
-    all_chunks: list = field(default_factory=list)
-    sources: list[dict] = field(default_factory=list)
-    has_aggregation: bool = False
     agg_count: int = 0
     document_ids: list[int] | None = None
     tools_called: list[str] = field(default_factory=list)
@@ -48,110 +32,26 @@ class RAGEngine:
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除
     SCORE_THRESHOLD = 0.92
-    DEFAULT_TOP_K = 10
 
-    MAX_HISTORY_TURNS = 5
     MIN_GAP_THRESHOLD = 0.05
 
-    # ==================== 上下文兼容辅助 ====================
+    # ==================== 搜索上下文辅助 ====================
 
     @staticmethod
     def _ctx_chunks(ctx) -> list:
-        """从 SearchContext 或 AnalysisContext 获取 chunks"""
-        return getattr(ctx, 'last_search_chunks', None) or getattr(ctx, 'chunks', [])
+        return ctx.last_search_chunks
 
     @staticmethod
     def _ctx_filtered(ctx) -> list:
-        return getattr(ctx, 'last_search_filtered', None) or getattr(ctx, 'filtered', [])
+        return ctx.last_search_filtered
 
     @staticmethod
     def _ctx_all_chunks(ctx) -> list:
-        return getattr(ctx, 'last_search_all_chunks', None) or getattr(ctx, 'all_chunks', [])
+        return ctx.last_search_all_chunks
 
     @staticmethod
     def _ctx_set_all_chunks(ctx, value):
-        if hasattr(ctx, 'last_search_all_chunks'):
-            ctx.last_search_all_chunks = value
-        else:
-            ctx.all_chunks = value
-
-    # ==================== 工具定义 ====================
-
-    def _create_search_tools(self, ctx):
-        """搜索工具：search_documents, list_documents"""
-
-        @tool
-        def search_documents(query: str, row_start: int | None = None, row_end: int | None = None,
-                             strategy: str = "standard") -> str:
-            """从知识库中搜索与问题相关的文档内容。需要查找具体信息、数据、记录时调用。搜索词应具体，包含数据中可能的列名。
-            如果要查询特定行号范围（如"第90到100行"、"第91行之后"），请传入 row_start 和 row_end 参数。"""
-            ctx.tools_called.append("search_documents")
-            ctx.search_count += 1
-            if ctx.search_count > 2:
-                logger.warning("搜索次数超限，拒绝第 %d 次搜索(query='%s')", ctx.search_count, query)
-                return (
-                    "你已经搜索两次了。请基于已获得的数据，"
-                    "直接回答或调用 calculate_sum/calculate_rank 进行精确计算。"
-                )
-            return self._execute_search(query, row_start, row_end, ctx, strategy=strategy)
-
-        @tool
-        def list_documents() -> str:
-            """列出当前知识库中可检索的文档数量和名称。当用户问"有多少文件"、"能搜到几个文档"、"有哪些文档"等元信息问题时调用。"""
-            ctx.tools_called.append("list_documents")
-            all_names = self.vector_store.get_document_names()
-            if ctx.document_ids:
-                matched = {did: all_names[did] for did in ctx.document_ids if did in all_names}
-            else:
-                matched = all_names
-            if not matched:
-                return "当前知识库中没有可检索的文档。"
-            lines = [f"共 {len(matched)} 个文档："]
-            for did, name in sorted(matched.items()):
-                lines.append(f"- [{did}] {name}")
-            return "\n".join(lines)
-
-        return [search_documents, list_documents]
-
-    def _create_analysis_tools(self, ctx):
-        """计算工具：calculate_sum, calculate_rank, read_all_rows
-        ctx 可以是 SearchContext 或 AnalysisContext，只要有 chunks/filtered/all_chunks 字段即可。"""
-
-        @tool
-        def calculate_sum(key_name: str, row_filter: str = "", content_filter: str = "") -> str:
-            """对已检索到的文档内容中指定列（key）的数值进行精确求和。当用户问"总共"、"合计"、"一共多少钱"等加总问题时调用。必须先调用 search_documents 获取数据后才能使用此工具。
-            content_filter: 可选，按内容过滤，格式为"列名=值"，如"品牌=万代"只对品牌为万代的行求和。"""
-            ctx.tools_called.append("calculate_sum")
-            ctx.agg_count += 1
-            if ctx.agg_count > 8:
-                logger.warning("计算工具调用超限，拒绝第 %d 次调用", ctx.agg_count)
-                return (
-                    "计算工具调用已达上限（最多8次）。"
-                    "请基于已获得的数据直接回答。"
-                )
-            return self._execute_sum(key_name, row_filter, content_filter, ctx)
-
-        @tool
-        def calculate_rank(key_name: str, ascending: bool, position: int = 1, content_filter: str = "") -> str:
-            """从已检索到的文档内容中，对指定列（key）的数值排序并返回第N名的记录。当用户问"最贵"、"最便宜"、"第三高"等排名问题时调用。ascending=true=升序(最便宜/最低)，false=降序(最贵/最高)。必须先调用 search_documents 获取数据后才能使用此工具。
-            content_filter: 可选，按内容过滤，格式为"列名=值"，如"品牌=万代"只对品牌为万代的记录排序。"""
-            ctx.tools_called.append("calculate_rank")
-            ctx.agg_count += 1
-            if ctx.agg_count > 8:
-                logger.warning("计算工具调用超限，拒绝第 %d 次调用", ctx.agg_count)
-                return (
-                    "计算工具调用已达上限（最多8次）。"
-                    "请基于已获得的数据直接回答。"
-                )
-            return self._execute_rank(key_name, ascending, position, content_filter, ctx)
-
-        @tool
-        def read_all_rows() -> str:
-            """读取当前搜索到的文档的全部内容。当需要完整信息（如所有章节、所有记录、完整清单、全部文本）时调用。当前 search_documents 只返回部分数据片段，调用此工具可获取全文。适用于所有文档类型（Word、Excel、PDF 等）。必须先调用 search_documents 才能使用。"""
-            ctx.tools_called.append("read_all_rows")
-            return self._execute_read_all_rows(ctx)
-
-        return [calculate_sum, calculate_rank, read_all_rows]
+        ctx.last_search_all_chunks = value
 
     # ==================== 搜索与结果处理 ====================
 
@@ -446,7 +346,6 @@ class RAGEngine:
         logger.info("执行搜索: query='%s', row_start=%s, row_end=%s", query, row_start, row_end)
         ctx = ctx or SearchContext()
         ctx.last_search_query = query
-        ctx.has_aggregation = False
 
         doc_filter = {"document_id": {"$in": ctx.document_ids}} if ctx.document_ids else None
 
@@ -464,14 +363,16 @@ class RAGEngine:
                 selected.sort(key=lambda x: x[0].metadata.get("row_number", 0))
                 filtered = []
                 # 检查是否返回了完整范围的数据
+                # 仅当显式指定 row_end 时才构造 expected_rows，避免 row_end 缺失时 end=999999 构造百万级 set
                 found_rows = {doc.metadata.get("row_number") for doc, _ in selected}
-                expected_rows = set(range(start, end + 1))
-                missing_rows = expected_rows - found_rows
-                if missing_rows:
-                    logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk, 缺失行: %s",
-                                start, end, len(selected), sorted(missing_rows)[:10])
-                else:
-                    logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk (完整)", start, end, len(selected))
+                if row_end is not None:
+                    expected_rows = set(range(start, end + 1))
+                    missing_rows = expected_rows - found_rows
+                    if missing_rows:
+                        logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk, 缺失行: %s",
+                                    start, end, len(selected), sorted(missing_rows)[:10])
+                    else:
+                        logger.info("行号范围查询(LLM指定): %d~%d, 共 %d 个 chunk (完整)", start, end, len(selected))
             else:
                 logger.info("行号范围查询: 未找到 %d~%d 范围内的数据", start, end)
                 return f"未找到行号 {start}~{end} 范围内的数据。"
@@ -624,7 +525,6 @@ class RAGEngine:
                      ctx=None) -> str:
         """对已检索结果执行求和，返回格式化计算结果"""
         ctx = ctx or SearchContext()
-        ctx.has_aggregation = True
         chunks = self._ctx_chunks(ctx)
         if not chunks:
             return "没有可计算的数据，请先调用 search_documents 搜索相关内容。"
@@ -671,7 +571,6 @@ class RAGEngine:
                       ctx=None) -> str:
         """对已检索结果执行排序，返回格式化排名结果"""
         ctx = ctx or SearchContext()
-        ctx.has_aggregation = True
         chunks = self._ctx_chunks(ctx)
         if not chunks:
             return "没有可计算的数据，请先调用 search_documents 搜索相关内容。"

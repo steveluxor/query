@@ -8,12 +8,13 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from app.config import settings
 from app.core.agent_memory import AgentMemory
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.agent_context import AgentContext
 from app.core.runtime_event_bus import RuntimeEventBus, EventType
 from app.models.data_types import CodeResult
-from app.models.schemas import QuestionRequest, MultiAgentResponse, Source, AgentStepInfo
+from app.models.schemas import QuestionRequest
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,15 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
     """Runtime Event Stream — Workflow 层状态变化（低频）"""
     queue = event_bus.subscribe(run_id)
 
+    if queue is None:
+        # run_id 不存在（未知 run / 已清理）：立即返回 runtime_error，避免永久挂起
+        async def not_found():
+            err = EventType.RUNTIME_ERROR.value
+            payload = json.dumps({"type": err, "data": {"error": "run not found"}})
+            yield f"event: {err}\ndata: {payload}\n\n"
+
+        return StreamingResponse(not_found(), media_type="text/event-stream")
+
     async def generate():
         try:
             while True:
@@ -84,27 +94,8 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
         except asyncio.CancelledError:
             pass
         finally:
-            event_bus.cleanup(run_id)
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-@router.get("/answer/{run_id}")
-async def stream_answer(run_id: str, event_bus: RuntimeEventBus = Depends(get_event_bus)):
-    """Answer Stream — Generation 层 token 增量（高频）"""
-    queue = event_bus.subscribe(run_id)
-
-    async def generate():
-        try:
-            while True:
-                event = await queue.get()
-                if event.type == EventType.TOKEN_CHUNK:
-                    yield f"data: {json.dumps(event.data)}\n\n"
-                elif event.type in (EventType.RUNTIME_COMPLETED, EventType.RUNTIME_ERROR):
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    break
-        except asyncio.CancelledError:
-            pass
+            # 引用计数：只移除本订阅者，channel 空时由 EventBus 自行删除（不误杀其他流）
+            event_bus.unsubscribe(run_id, queue)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -124,21 +115,17 @@ async def _run_and_emit(
         result["question"] = context.question
 
         # Phase 2: callback Java 持久化（成功后再 emit completed）
-        await _callback_java(context.session_id, result)
+        callback_ok = await _callback_java(context.session_id, result, agent_memory)
 
-        # 持久化成功后发射完成事件
-        await context.emit(EventType.RUNTIME_COMPLETED, result)
+        if not callback_ok:
+            raise RuntimeError("callback 持久化失败")
+
+        # 精简载荷：完整 result 已走 callback 持久化，前端 reload 历史即可，无需再传大对象（含 base64 图表）
+        await context.emit(EventType.RUNTIME_COMPLETED, {"session_id": context.session_id})
 
     except Exception as e:
         logger.error("[QA] 执行失败: %s", e, exc_info=True)
         await context.emit(EventType.RUNTIME_ERROR, {"error": str(e)})
-    finally:
-        # 清理 MCP session
-        if context.mcp_session_id:
-            try:
-                await orchestrator.mcp_client.cleanup_session(context.mcp_session_id)
-            except Exception:
-                pass
 
 
 def _build_response(context: AgentContext, agent_memory: AgentMemory) -> dict:
@@ -198,21 +185,36 @@ def _build_response(context: AgentContext, agent_memory: AgentMemory) -> dict:
     }
 
 
-async def _callback_java(session_id: str | None, result: dict):
-    """POST 完整结果到 Java /qa/callback 端点，由 Java 持久化到 MySQL/Redis/MinIO"""
-    if not session_id:
-        return
+async def _callback_java(session_id: str | None, result: dict, agent_memory: AgentMemory) -> bool:
+    """POST 完整结果到 Java /qa/callback 端点，由 Java 持久化到 MySQL/Redis/MinIO。
 
-    java_base_url = os.getenv("JAVA_BASE_URL", "http://localhost:8085")
+    返回是否持久化成功：
+    - 无 session_id → 无需持久化，视为成功
+    - 成功（200）→ 清除 memory dirty 标记，返回 True
+    - 异常或非 200 → 返回 False，调用方应发 RUNTIME_ERROR 而非 RUNTIME_COMPLETED
+    """
+    if not session_id:
+        return True
+
+    headers = {}
+    if settings.callback_token:
+        headers["X-Callback-Token"] = settings.callback_token
+
+    java_base_url = os.getenv("JAVA_BASE_URL", settings.java_base_url)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{java_base_url}/qa/callback", json={
-                "session_id": session_id,
-                "result": result,
-            })
+            resp = await client.post(
+                f"{java_base_url}/qa/callback",
+                json={"session_id": session_id, "result": result},
+                headers=headers,
+            )
             if resp.status_code == 200:
                 logger.info("[QA] callback 持久化成功: session_id=%s", session_id)
+                agent_memory.mark_synced(session_id)
+                return True
             else:
                 logger.warning("[QA] callback 返回异常: status=%d, body=%s", resp.status_code, resp.text)
+                return False
     except Exception as e:
         logger.error("[QA] callback 失败: %s", e)
+        return False

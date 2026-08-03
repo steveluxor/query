@@ -86,9 +86,10 @@ app.mount("/generated", StaticFiles(directory="generated"), name="generated")
 
 @app.exception_handler(BizException)
 async def biz_exception_handler(request: Request, exc: BizException):
-    """业务异常处理"""
+    """业务异常处理：HTTP 状态码与业务码对齐（400/404/500），其余业务码统一归 500"""
+    status = exc.code if exc.code in (400, 404, 500) else 500
     return JSONResponse(
-        status_code=400,
+        status_code=status,
         content={"code": exc.code, "message": exc.message}
     )
 

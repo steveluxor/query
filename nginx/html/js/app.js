@@ -1302,6 +1302,7 @@
         }
         els.resultWorkspace.style.display = 'none';
         els.dagContent.innerHTML = '<div class="dag-empty">规划中...</div>';
+        _removeLiveAnswer();
 
         try {
             qaLoading = true;
@@ -1348,6 +1349,7 @@
 
     async function _finishQuestion(wasPending) {
         _removeLiveTrace();
+        _removeLiveAnswer();
         await loadQaHistory();
         state._pendingUserBubble = null;
         state._pendingLoadingBubble = null;
@@ -1361,6 +1363,8 @@
     let _currentRuntimeSource = null;
     let _liveTraceSteps = [];    // 当前执行的 trace 步骤
     let _liveTraceEl = null;     // 中间区域的实时 trace DOM 元素
+    let _liveAnswerEl = null;    // 中间区域的实时回答 DOM 元素
+    let _liveAnswerText = '';    // 累积的回答 token 文本
 
     function _connectSSE(runId, onComplete) {
         // 关闭旧连接
@@ -1373,15 +1377,8 @@
         const runtimeSource = new EventSource(`/qa/runtime/${runId}?token=${encodeURIComponent(token)}`);
         _currentRuntimeSource = runtimeSource;
         let currentPlan = null;
-
-        runtimeSource.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                _handleRuntimeEvent(msg, currentPlan);
-            } catch (e) {
-                console.warn('[SSE] 解析失败:', e);
-            }
-        };
+        _liveAnswerText = '';
+        let _sseCompleted = false;
 
         // 监听自定义事件（plan_generated 等）
         runtimeSource.addEventListener('plan_generated', (event) => {
@@ -1461,29 +1458,60 @@
             }
         });
 
+        // token_chunk: 流式回答，打字机效果
+        runtimeSource.addEventListener('token_chunk', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.text) {
+                    _liveAnswerText += msg.data.text;
+                    _renderLiveAnswer();
+                    // 首个 token 到达时移除 loading 气泡
+                    const loadingEl = document.getElementById('loadingBubble');
+                    if (loadingEl) loadingEl.remove();
+                }
+            } catch (e) {
+                console.warn('[SSE] token_chunk 解析失败:', e);
+            }
+        });
+
         runtimeSource.addEventListener('runtime_completed', () => {
+            if (_sseCompleted) return;
+            _sseCompleted = true;
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _removeLiveAnswer();
             if (onComplete) onComplete();
         });
 
-        runtimeSource.addEventListener('runtime_error', () => {
+        runtimeSource.addEventListener('runtime_error', (event) => {
+            if (_sseCompleted) return;
+            _sseCompleted = true;
+            // 透传错误文本，不再静默关闭
+            let errorText = '执行失败';
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.data && msg.data.error) errorText = String(msg.data.error);
+            } catch (e) { /* 解析失败则用默认文本 */ }
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _removeLiveAnswer();
+            showToast(errorText, 'error');
             if (onComplete) onComplete();
         });
 
         runtimeSource.onerror = () => {
+            if (_sseCompleted) return;
             runtimeSource.close();
             _currentRuntimeSource = null;
-            // SSE 断开不报错，等 runtime_completed/runtime_error 或超时
+            // SSE 断开后延迟清理，兜底未收到 runtime_completed 的情况
+            setTimeout(() => {
+                if (!_sseCompleted) {
+                    _sseCompleted = true;
+                    _removeLiveAnswer();
+                    if (onComplete) onComplete();
+                }
+            }, 2000);
         };
-    }
-
-    function _handleRuntimeEvent(msg, plan) {
-        // 通用事件处理（onmessage 兜底）
-        if (!msg.type || !plan) return;
-        // agent 事件已在 addEventListener 中处理，这里做兜底
     }
 
     // 实时 trace：仅显示已开始的步骤（逐步追加）
@@ -1557,6 +1585,46 @@
         }
         _liveTraceEl = null;
         _liveTraceSteps = [];
+    }
+
+    // 流式回答：打字机效果，实时显示 Generator 输出
+    function _renderLiveAnswer() {
+        if (!_liveAnswerText) return;
+
+        const container = els.agentTrace;
+        if (!_liveAnswerEl) {
+            _liveAnswerEl = document.createElement('div');
+            _liveAnswerEl.className = 'live-answer';
+        }
+
+        _liveAnswerEl.innerHTML = `<div class="live-answer-content">${renderMarkdown(_liveAnswerText)}</div>`;
+
+        // 插入到 live-trace 之后（如果还没有的话）
+        if (!_liveAnswerEl.parentElement) {
+            const liveTrace = container.querySelector('.live-trace');
+            if (liveTrace) {
+                liveTrace.after(_liveAnswerEl);
+            } else {
+                const chatHistory = container.querySelector('.chat-history');
+                if (chatHistory) {
+                    chatHistory.after(_liveAnswerEl);
+                } else {
+                    container.appendChild(_liveAnswerEl);
+                }
+            }
+        }
+
+        // 自动滚动到底部
+        const scroll = container.closest('.main-scroll');
+        if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    }
+
+    function _removeLiveAnswer() {
+        if (_liveAnswerEl && _liveAnswerEl.parentElement) {
+            _liveAnswerEl.remove();
+        }
+        _liveAnswerEl = null;
+        _liveAnswerText = '';
     }
 
     // 实时渲染 DAG（所有节点初始为 pending）

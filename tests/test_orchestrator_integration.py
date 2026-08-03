@@ -219,7 +219,9 @@ class TestMCPSessionLifecycle:
             raise RuntimeError("搜索失败")
         orchestrator.registry.get_agent("retrieval").execute = _make_execute_mock(retrieval_fail)
 
-        with pytest.raises(RuntimeError, match="搜索失败"):
+        # A4 修复后：失败任务标记 FAILED，goal_outputs 校验抛出 WorkflowExecutionError（而非原始 RuntimeError）
+        from app.exceptions import WorkflowExecutionError
+        with pytest.raises(WorkflowExecutionError, match="未产生目标输出"):
             await orchestrator.run(context)
 
         mock_mcp_client.create_session.assert_called_once()
