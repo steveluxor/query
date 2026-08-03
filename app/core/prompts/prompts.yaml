@@ -98,6 +98,7 @@ code:
     - question: str，用户的原始问题
 
     规则：
+    - data 可能包含多个文档的数据（每行含 `文件` 字段标识来源）。只使用与 question 直接相关的文档数据，忽略无关文档（如账单、清单等）
     - 只生成纯 Python 代码，不要任何解释或 markdown 代码块
     - 代码最后必须设置 `result` 变量，包含计算结果
     - result 应该是 dict、list 或基本类型（str/int/float）
@@ -394,5 +395,5 @@ relevance:
     规则：
     - 只返回与问题直接相关的文档 ID
     - 如果不确定，倾向于保留（宁可多处理，不要漏掉）
-    - 返回 JSON 格式：{"relevant_ids": [1, 2, 5]}
+    - 返回 JSON 格式：{{"relevant_ids": [1, 2, 5]}}
     - 只返回 JSON，不要解释

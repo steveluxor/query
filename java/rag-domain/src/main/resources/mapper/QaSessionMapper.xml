@@ -29,7 +29,7 @@
     </select>
 
     <update id="updateTitle">
-        update qa_session set title = #{title}, update_time = now() where id = #{id} and title is null
+        update qa_session set title = IFNULL(title, #{title}), update_time = now() where id = #{id}
     </update>
 
     <update id="updatePreferences">

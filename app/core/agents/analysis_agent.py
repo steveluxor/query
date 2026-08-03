@@ -3,7 +3,7 @@ import logging
 from langchain.agents import create_agent
 
 from app.core.agents.base_agent import BaseAgent
-from app.core.agent_context import AgentContext
+from app.core.agent_context import AgentContext, _task_objective_var
 from app.core.mcp.client import MCPClient
 from app.core.mcp.tools import create_mcp_tools
 from app.core.prompts.prompt_manager import PromptManager
@@ -52,7 +52,7 @@ class AnalysisAgent(BaseAgent):
 
         try:
             result = await agent.ainvoke(
-                {"messages": [("human", context.question)]},
+                {"messages": [("human", _task_objective_var.get() or context.question)]},
                 config={"recursion_limit": 15},
             )
 

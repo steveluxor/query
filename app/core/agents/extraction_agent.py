@@ -4,7 +4,7 @@ import logging
 import re
 
 from app.core.agents.base_agent import BaseAgent
-from app.core.agent_context import AgentContext
+from app.core.agent_context import AgentContext, _task_objective_var
 from app.core.infra.llm_factory import create_llm
 from app.core.prompts.prompt_manager import PromptManager
 from app.models.capability import AgentCapability
@@ -75,7 +75,7 @@ class ExtractionAgent(BaseAgent):
 
     async def run(self, context: AgentContext, knowledge_document: DocumentBundle = None, **kwargs) -> AgentContext:
         bundle = knowledge_document or DocumentBundle(chunks=[])
-        question = context.question
+        question = _task_objective_var.get() or context.question
 
         if not bundle.chunks:
             logger.warning("[Extractor] 无文档需要提取")

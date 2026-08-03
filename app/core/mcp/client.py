@@ -63,10 +63,14 @@ class MCPClient:
             arguments = {"session_id": session_id, **arguments}
             # 注入 task_id 实现 task 隔离（并行检索时各 task 读写各自的 search context）
             if tool_name not in self._INGESTION_TOOLS:
-                from app.core.agent_context import _task_id_var
+                from app.core.agent_context import _task_id_var, _search_ctx_source_var
                 task_id = _task_id_var.get()
                 if task_id:
                     arguments = {"task_id": task_id, **arguments}
+                # 消费者工具锁定上游"检索提供者"的 ctx（并行分支 DAG 下避免读到别的分支）
+                ctx_source = _search_ctx_source_var.get()
+                if ctx_source:
+                    arguments = {"ctx_source_id": ctx_source, **arguments}
 
         logger.info("[MCP Client] 调用工具: %s(%s)", tool_name, arguments)
         result = await self.session.call_tool(tool_name, arguments)

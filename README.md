@@ -2,7 +2,7 @@
 
 > **LLM generates plans, Runtime guarantees execution.**
 >
-> 基于 Planner + DAG Workflow 的 Multi-Agent 自主任务执行系统，SSE 双流实时推送，Java 统一网关
+> 基于 Planner + DAG Workflow 的 Multi-Agent 自主任务执行系统，SSE 单流实时推送，Java 统一网关
 
 ---
 
@@ -116,7 +116,7 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
 | **Planning Layer** | 理解用户意图，生成任务 DAG |
 | **Runtime Layer** | DAG 调度、并行执行、数据流注入 |
 | **Capability Layer** | 检索、分析、代码执行等能力 |
-| **Presentation Layer** | SSE 双流 + Java 透传 + 前端实时渲染 |
+| **Presentation Layer** | SSE 单流 + Java 透传 + 前端实时渲染 |
 
 ---
 
@@ -148,18 +148,21 @@ Answer → RuleValidator (确定性, <100ms) → 通过?
 
 RuleValidator 做空 answer + 数值一致性检查（支持 95/95%/0.95 normalize），LLM Critic 做语义矛盾检测。
 
-### 5. SSE 双流 + Java 透传
+### 5. SSE 单流 + Java 透传 + 双端心跳
 
 ```
 POST /qa/ask → Java → Python → {run_id}           ← 异步返回
-GET /qa/runtime/{run_id}  → Nginx → Java SseEmitter → Python SSE
-GET /qa/answer/{run_id}   → Nginx → Java SseEmitter → Python SSE
-POST /qa/callback          ← Python → Java 持久化
+GET /qa/runtime/{run_id}  → Nginx → Java SseEmitter → Python SSE  ← 唯一流
+POST /qa/callback          ← Python → Java 持久化（X-Callback-Token 鉴权）
 ```
 
-**Python 对前端不可见**，所有通信经 Java 透传。RuntimeEventBus 历史缓存保证迟到订阅不丢事件。
+**Python 对前端不可见**，所有通信经 Java 透传。token_chunk 与事件合并为**单条 SSE 流**（`/qa/runtime`），删除冗余的 `/qa/answer` 端点；RuntimeEventBus 历史缓存保证迟到订阅不丢事件。
 
-前端实时显示：DAG 节点状态变化 + Agent Trace 逐步展开 + 标签页切换查看完整结果。
+- **双端心跳保活**：Python `: ping`（asyncio.wait_for 15s 超时）+ Java SseEmitter comment（15s 调度），规避 Nginx/proxy 空闲断连
+- **callback 鉴权容错**：Python 携带 `X-Callback-Token` 调用 `/qa/callback`，Java 校验失败 → 发 `RUNTIME_ERROR` 不回 `RUNTIME_COMPLETED`；完成载荷精简为仅 `session_id`
+- **并发隔离**：并行分支 DAG 按依赖锁定上游"检索提供者"（`ctx_source_id`），各任务读写独立 search context，不串台
+
+前端实时显示：DAG 节点状态变化 + Agent Trace 逐步展开 + 标签页切换查看完整结果；切换会话再切回可恢复进行中过程视图。
 
 ### 6. CodeAgent 沙箱
 
@@ -172,6 +175,34 @@ POST /qa/callback          ← Python → Java 持久化
 ### 8. LLM 推理管线优化
 
 Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字）→ Generator/Critic prompt 自动瘦身 → Token Metrics 全链路追踪。
+
+### 9. 并行分支 DAG 检索上下文隔离
+
+并行分支各 task 通过 contextvars 隔离任务上下文，MCP 按 DAG 依赖锁定上游"检索提供者"（`ctx_source_id`），串行链式场景复用共享检索结果。保证并行检索互不覆盖、数据流正确注入。
+
+### 10. 检索相关性过滤 + 数据范围收敛
+
+MCP Server 层 LLM 批量判断文档摘要与问题相关性，过滤后**写回 search context**（`last_search_chunks` + 惰性缓存失效），`read_all_rows`/`calculate_*` 只看到相关文档；Code prompt 增加按 `文件` 字段的数据范围守卫。无关文档（如账单）不会全量泄漏给 analysis/code。
+
+---
+
+## 关键设计决策（为什么）
+
+### 为什么 SSE 用单流而不是双流
+
+token 本质上是带 `type` 的事件，独立开一条 `/qa/answer` 流没有语义收益，只会让连接、心跳、前端状态管理翻倍。单流下前端一个 EventSource、一处双端心跳、Java 只维护一个 SseEmitter，事件顺序天然一致。代价是单点风险，由双端心跳 + callback 容错兜底。
+
+### 为什么 Python 保持无状态
+
+Python 只有进程内瞬态（AgentMemory / 事件总线 / MCP session），无持久化状态；source of truth 在 Java 侧（MySQL / Redis / MinIO），Python 崩溃后从 Java 历史重建记忆。好处：多实例水平扩容无会话粘滞、崩溃重启零恢复成本、AI 逻辑可频繁发布、持久化与鉴权收敛在 Java 单一安全边界内。
+
+### 为什么 Java 做统一网关
+
+前端只暴露 Java 一个入口，认证 / 权限 / 持久化统一收敛，Python AI 服务对前端不可见。Java 与 Python 通过 SSE / HTTP callback / MCP 契约解耦，可独立演进。
+
+### 为什么 LLM 默认超时用 120s
+
+DeepSeek 高延迟下 30s 默认超时会让 SDK 自动重试 ×2，一次慢调用被拖成 ~90s 空转，且挂在链路第一个关键路径（Planner）上最明显。统一 `create_llm` 默认超时 120s，Planner/Code 等一次调用完成（~40s），前端感知显著下降；`@lru_cache` 重建容器即失效，无残留。
 
 ---
 
@@ -187,7 +218,7 @@ Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字�
 | DAG 校验层 | 6 层 |
 | Docker 服务 | 9 个 |
 | 数据库 | MySQL + Redis + ChromaDB |
-| SSE 端点 | 2 个（Java 透传）|
+| SSE 端点 | 1 个（Java 透传，单流）|
 | API 端点 | 16 个 |
 
 ---
@@ -196,8 +227,7 @@ Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字�
 
 ```
 前端(:8080) → Nginx
-               ├── /qa/runtime/* → Java(:8085) → Python(:8000)  ← SSE 透传
-               ├── /qa/answer/*  → Java(:8085) → Python(:8000)  ← SSE 透传
+               ├── /qa/runtime/* → Java(:8085) → Python(:8000)  ← SSE 单流透传
                ├── /qa/*         → Java(:8085) → Python(:8000)  ← API 转发
                └── /charts/*    → Java(:8085)                   ← 图片代理
                                     ↓
@@ -244,7 +274,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-> 详细架构设计文档见 `docs/archive/`
+> 详细架构设计文档见 [docs/archive/CLAUDE_MultiAgent_v12.md](docs/archive/CLAUDE_MultiAgent_v12.md)
 
 ---
 
@@ -258,6 +288,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 实现 DAG Scheduler，支持拓扑排序、异步并行执行、port_bindings 数据流注入以及子图级失败恢复
 - 构建 MCP Tool Runtime，通过标准化 Tool Interface 解耦 Agent 与 RAG、数据分析、代码执行等外部能力
 - 实现两级 Critic 闭环：RuleValidator（确定性规则，<100ms）+ Slim LLM Critic（语义矛盾检测，5-15s），支持精准子图重执行
-- 设计 SSE 双流 + Java 透传架构：Python 无状态，RuntimeEventBus per-run pub-sub + 历史缓存，前端实时接收 DAG 状态和 Agent 执行进度
+- 设计 SSE 单流 + Java 透传架构：Python 无状态，RuntimeEventBus per-run pub-sub + 历史缓存；双端心跳保活、callback 鉴权容错、并行分支检索上下文隔离，前端实时接收 DAG 状态和 Agent 执行进度
 - 实现 CodeAgent Sandbox，通过进程隔离、资源限制和模块白名单降低 LLM 生成代码执行风险
 - 优化 LLM 推理管线：Extractor 输出精简（attributes 短语化 + evidence 核心断言），Generator token budget，Critic slim prompt，全链路 Token Metrics
+- 可靠性加固：全局 LLM 超时 120s 消除慢 API 重试空转；搜索相关性过滤写回上下文收敛下游数据范围；模板花括号转义防 KeyError

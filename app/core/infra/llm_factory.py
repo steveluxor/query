@@ -6,7 +6,7 @@ from app.config import settings
 
 
 @lru_cache(maxsize=8)
-def create_llm(temperature: float = 0.1, max_tokens: int = 4096, timeout: int = 30) -> ChatOpenAI:
+def create_llm(temperature: float = 0.1, max_tokens: int = 4096, timeout: int = 120) -> ChatOpenAI:
     """统一创建 LLM 客户端，相同参数返回缓存实例"""
     return ChatOpenAI(
         api_key=settings.llm_api_key,

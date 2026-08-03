@@ -52,7 +52,9 @@ public class QaController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Result.fail("callback token 校验失败"));
         }
         log.info("Python Callback: sessionId={}", body.get("session_id"));
-        return ResponseEntity.ok(qaService.handleCallback(body));
+        Result r = qaService.handleCallback(body);
+        return r.getCode() == 200 ? ResponseEntity.ok(r)
+                : ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(r);
     }
 
     @GetMapping("/sessions")

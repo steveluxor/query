@@ -4,7 +4,7 @@ import re
 import time
 
 from app.core.actions import ActionRegistry
-from app.core.agent_context import AgentContext, AgentStep, _task_id_var
+from app.core.agent_context import AgentContext, AgentStep, _task_id_var, _search_ctx_source_var, _task_objective_var
 from app.core.agent_memory import AgentMemory
 from app.core.infra.redis_store import RedisStore
 from app.core.mcp.client import MCPClient
@@ -95,6 +95,8 @@ class AgentOrchestrator:
                     summary=f"生成 {len(plan.tasks)} 节点 DAG",
                 ))
                 planner_duration = int((time.time() - plan_start) * 1000)
+                logger.info("[Orchestrator] Planner 耗时 %dms，生成 %d 节点 DAG",
+                            planner_duration, len(plan.tasks))
                 await context.emit(EventType.PLAN_GENERATED, {
                     "goal": plan.goal,
                     "planner": {
@@ -247,6 +249,45 @@ class AgentOrchestrator:
                     if port_name in task.port_bindings:
                         break
 
+    def _resolve_search_provider(self, context: AgentContext, task: TaskNode) -> str:
+        """找到最近的上游"检索提供者" task_id（capability.tools 含 search_documents）。
+
+        消费者工具（calculate_sum/rank/read_all_rows）不自己搜索，依赖上游检索产生的
+        SearchContext。并行分支 DAG 下共享 search_ctx 会被最后一次搜索覆盖，必须按
+        依赖关系锁定提供者。数据驱动：通过 capability.tools 判断，不硬编码 agent 名。
+        """
+        plan = context.plan
+        if not plan:
+            return ""
+        # 自身就是检索提供者（会 search_documents）→ 用自己的 ctx，不绑定上游
+        own_cap = self.registry.get(task.agent)
+        if own_cap and "search_documents" in own_cap.tools:
+            return ""
+        task_map = {t.id: t for t in plan.tasks}
+        seen: set[str] = set()
+
+        def _walk(tid: str):
+            if tid in seen:
+                return None
+            seen.add(tid)
+            dep = task_map.get(tid)
+            if not dep:
+                return None
+            cap = self.registry.get(dep.agent)
+            if cap and "search_documents" in cap.tools:
+                return dep.id
+            for up in dep.depends_on:
+                r = _walk(up)
+                if r:
+                    return r
+            return None
+
+        for dep_id in task.depends_on:
+            r = _walk(dep_id)
+            if r:
+                return r
+        return ""
+
     async def _run_plan_task(self, context: AgentContext, task: TaskNode, original_question: str):
         """按 capability 驱动统一执行 — 不区分 role，AgentResult 承载 outputs 和 actions"""
         cap = self.registry.get(task.agent)
@@ -275,7 +316,9 @@ class AgentOrchestrator:
 
         context.current_task_id = task.id
         _task_id_var.set(task.id)
-        context.question = task.objective
+        # 消费者工具（calculate_sum/rank/read_all_rows）的 search ctx 来源：上游"检索提供者" task_id
+        _search_ctx_source_var.set(self._resolve_search_provider(context, task))
+        _task_objective_var.set(task.objective)
 
         task_start = time.time()
 
@@ -337,8 +380,6 @@ class AgentOrchestrator:
                 "error": str(e),
             })
             raise
-        finally:
-            context.question = original_question
 
     # ==================== Plan-and-Execute ====================
 
@@ -468,7 +509,11 @@ class AgentOrchestrator:
                         "花了多少", "一共")
         rank_keywords = ("最贵", "最便宜", "排名", "排序", "最高", "最低", "rank", "top")
         # 裸 "第" 会把 "第二个文件"/"第一季度" 误判为排名，仅当 "第N高/低/名/贵/便宜/位" 才算排名
-        rank_patterns = (r"第\s*\d+\s*(高|低|名|贵|便宜|位)",)
+        # 同时覆盖汉字数字（"第二贵""第三名"）
+        rank_patterns = (
+            r"第\s*\d+\s*(高|低|名|贵|便宜|位)",
+            r"第[一二两三四五六七八九十百千]+\s*(高|低|名|贵|便宜|位)",
+        )
 
         needs_sum = any(kw in lower_q for kw in sum_keywords)
         needs_rank = any(kw in lower_q for kw in rank_keywords) or any(re.search(p, lower_q) for p in rank_patterns)

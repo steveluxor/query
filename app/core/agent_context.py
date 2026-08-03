@@ -11,6 +11,12 @@ from app.models.task_graph import TaskGraph
 # asyncio-task-local task_id，用于 asyncio.gather 并发时隔离各 task 的 current_task_id
 # 每个 asyncio Task 有独立的 Context 副本，set() 只影响当前 Task
 _task_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('agent_task_id', default='')
+# 消费者工具（calculate_sum/rank/read_all_rows）读取 search ctx 的来源 task_id：
+# 由 Orchestrator 按 DAG 依赖解析（上游"检索提供者"），空则用自身 task_id / 共享 search_ctx
+_search_ctx_source_var: contextvars.ContextVar[str] = contextvars.ContextVar('search_ctx_source', default='')
+# 子任务 objective：并行分支各 task 经 contextvar 隔离（与 _task_id_var 同机制），
+# 共享字段 context.question 不再被覆盖，恒为用户原始问题
+_task_objective_var: contextvars.ContextVar[str] = contextvars.ContextVar('agent_task_objective', default='')
 
 
 @dataclass

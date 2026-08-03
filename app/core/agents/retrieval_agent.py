@@ -3,7 +3,7 @@ import logging
 import re
 
 from app.core.agents.base_agent import BaseAgent
-from app.core.agent_context import AgentContext
+from app.core.agent_context import AgentContext, _task_objective_var
 from app.core.infra.llm_factory import create_llm
 from app.models.capability import AgentCapability
 from app.models.data_types import DocumentBundle, DocumentChunk, RetrievalReport
@@ -47,7 +47,7 @@ class RetrievalAgent(BaseAgent):
     )
 
     async def run(self, context: AgentContext, mcp_client=None, mcp_session_id: str = "", **kwargs) -> AgentContext:
-        question = context.question
+        question = _task_objective_var.get() or context.question
         original_question = kwargs.get("original_question", question)
 
         # 1. LLM 生成搜索词 + 查询类型（单次调用，temperature=0）

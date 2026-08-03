@@ -85,7 +85,12 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
     async def generate():
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    # SSE 心跳：长 Planner/无事件阶段保活（Java 代理不转发注释行，仅维持连接）
+                    yield ": ping\n\n"
+                    continue
                 event_type = event.type.value
                 payload = json.dumps({"type": event_type, "data": event.data})
                 yield f"event: {event_type}\ndata: {payload}\n\n"
@@ -208,7 +213,7 @@ async def _callback_java(session_id: str | None, result: dict, agent_memory: Age
                 json={"session_id": session_id, "result": result},
                 headers=headers,
             )
-            if resp.status_code == 200:
+            if resp.status_code == 200 and resp.json().get("code") == 200:
                 logger.info("[QA] callback 持久化成功: session_id=%s", session_id)
                 agent_memory.mark_synced(session_id)
                 return True

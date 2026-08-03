@@ -7,7 +7,7 @@ import re
 import time
 
 from app.core.agents.base_agent import BaseAgent
-from app.core.agent_context import AgentContext
+from app.core.agent_context import AgentContext, _task_objective_var
 from app.core.code_executor import CodeExecutor
 from app.core.infra.llm_factory import create_llm
 from app.core.mcp.client import MCPClient
@@ -60,7 +60,7 @@ class CodeAgent(BaseAgent):
 
         context_vars = {
             "data": data_rows,
-            "question": context.question,
+            "question": _task_objective_var.get() or context.question,
         }
 
         # 2. 构建数据摘要
@@ -73,7 +73,7 @@ class CodeAgent(BaseAgent):
 
         for attempt in range(MAX_RETRIES + 1):
             code = await self._generate_code(
-                context.question, data_summary, last_error,
+                _task_objective_var.get() or context.question, data_summary, last_error,
             )
             t0 = time.time()
             exec_result = await CodeExecutor.execute(code, context_vars)
@@ -253,7 +253,7 @@ class CodeAgent(BaseAgent):
         if last_error:
             user_prompt += f"\n\n上一次执行出错：{last_error}\n请修复代码后重新生成。"
 
-        llm = self.llm or create_llm(temperature=0, max_tokens=4096)
+        llm = self.llm or create_llm(temperature=0, max_tokens=4096, timeout=120)
         result = await llm.ainvoke([
             ("system", system_prompt),
             ("human", user_prompt),

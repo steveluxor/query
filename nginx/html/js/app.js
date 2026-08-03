@@ -20,6 +20,7 @@
         pendingSession: null,
         _pendingUserBubble: null,
         _pendingLoadingBubble: null,
+        _pendingSessionId: null, // 进行中 user/loading 气泡所属 session（切页恢复用）
         _awaitingFirstResponse: false,
     };
 
@@ -555,16 +556,20 @@
 
     function renderSessionList() {
         const container = els.sessionList;
-        const all = [...state.sessions];
+        // 先对持久化会话按更新时间排序（最近使用的在前），updateTime 缺失时用 id 兜底
+        const sorted = [...state.sessions].sort((a, b) => {
+            const ta = a.updateTime ? new Date(a.updateTime).getTime() : 0;
+            const tb = b.updateTime ? new Date(b.updateTime).getTime() : 0;
+            return (tb - ta) || ((b.id || 0) - (a.id || 0));
+        });
+        // 进行中的新会话（未持久化）固定在列表顶部
         if (state.pendingSession) {
-            all.unshift(state.pendingSession);
+            sorted.unshift(state.pendingSession);
         }
-        if (all.length === 0) {
+        if (sorted.length === 0) {
             container.innerHTML = '<div class="session-empty">暂无任务</div>';
             return;
         }
-
-        const sorted = all.sort((a, b) => (b.id || 0) - (a.id || 0));
         container.innerHTML = sorted.map(s => {
             const title = s.title || '新任务';
             const isActive = s.id === state.currentSessionId;
@@ -654,6 +659,7 @@
             state.pendingSession = null;
             state._pendingUserBubble = null;
             state._pendingLoadingBubble = null;
+            state._pendingSessionId = null;
         }
         state.currentSessionId = sessionId;
         renderSessionList();
@@ -672,6 +678,7 @@
             state.pendingSession = null;
             state._pendingUserBubble = null;
             state._pendingLoadingBubble = null;
+            state._pendingSessionId = null;
             state.currentSessionId = null;
             renderSessionList();
             updateQaHeader();
@@ -691,6 +698,16 @@
             await Api.deleteSession(sessionId);
             if (state.currentSessionId === sessionId) {
                 state.currentSessionId = null;
+            }
+            // 若删除的是进行中 run/气泡所属会话，立即清理实时状态
+            if (_liveRunSessionId === sessionId || state._pendingSessionId === sessionId) {
+                _removeLiveTrace();
+                _removeLiveAnswer();
+                _liveRunSessionId = null;
+                _livePlan = null;
+                state._pendingUserBubble = null;
+                state._pendingLoadingBubble = null;
+                state._pendingSessionId = null;
             }
             await loadSessions();
             showToast('对话已删除', 'success');
@@ -1157,13 +1174,23 @@
         const workspace = els.resultWorkspace;
 
         if (!messages || messages.length === 0) {
-            container.innerHTML = `
-                <div class="trace-empty">
-                    <div class="trace-empty-icon">💬</div>
-                    <div class="trace-empty-text">暂无问答记录，在下方输入问题开始分析</div>
-                </div>`;
+            const ownsRun = _liveRunSessionId === state.currentSessionId && _currentRuntimeSource;
+            // 首问进行中切回：用 pending 气泡渲染 chat-history 占位
+            if (state._pendingSessionId === state.currentSessionId && state._pendingUserBubble && state._pendingLoadingBubble) {
+                container.innerHTML = `<div class="chat-history">${state._pendingUserBubble}${state._pendingLoadingBubble}</div>`;
+            } else {
+                container.innerHTML = `
+                    <div class="trace-empty">
+                        <div class="trace-empty-icon">💬</div>
+                        <div class="trace-empty-text">暂无问答记录，在下方输入问题开始分析</div>
+                    </div>`;
+            }
             workspace.style.display = 'none';
-            els.dagContent.innerHTML = '<div class="dag-empty">执行任务后显示</div>';
+            if (ownsRun) {
+                _restoreLiveProcess();
+            } else {
+                els.dagContent.innerHTML = '<div class="dag-empty">执行任务后显示</div>';
+            }
             return;
         }
 
@@ -1189,8 +1216,8 @@
         html += '</div>';
         container.innerHTML = html;
 
-        // 如果有进行中的消息（用户气泡 + loading），追加到末尾
-        if (state._pendingUserBubble && state._pendingLoadingBubble) {
+        // 如果有进行中的消息（用户气泡 + loading），且属于当前会话，追加到末尾
+        if (state._pendingSessionId === state.currentSessionId && state._pendingUserBubble && state._pendingLoadingBubble) {
             const chatDiv = container.querySelector('.chat-history');
             if (chatDiv) {
                 chatDiv.insertAdjacentHTML('beforeend', state._pendingUserBubble + state._pendingLoadingBubble);
@@ -1200,6 +1227,26 @@
 
         // 默认显示最后一轮
         _renderRound(messages.length - 1);
+
+        // 切回进行中会话时，恢复实时进度（DAG / trace / 流式回答）
+        _restoreLiveProcess();
+    }
+
+    // 切回 run 所属会话时，从内存态恢复实时进度
+    function _restoreLiveProcess() {
+        if (_liveRunSessionId !== state.currentSessionId) return;
+        if (!_currentRuntimeSource) return;
+        if (_livePlan) _restoreLiveDag();
+        if (_liveTraceSteps.length > 0) _renderLiveTrace();
+        if (_liveAnswerText) _renderLiveAnswer();
+    }
+
+    function _restoreLiveDag() {
+        if (!_livePlan) return;
+        _renderLiveDag(_livePlan);          // 重绘结构（节点为 pending）
+        _liveTraceSteps.forEach(s => {      // 回放各节点真实状态
+            if (s.status !== 'pending') _updateDagNodeStatus(s.id, s.status);
+        });
     }
 
     // 渲染指定轮次的 Agent Trace + DAG + 结果
@@ -1294,6 +1341,7 @@
         // 保存进行中的消息，供切页后恢复
         state._pendingUserBubble = userBubble;
         state._pendingLoadingBubble = loadingBubble;
+        state._pendingSessionId = state.currentSessionId;
         if (existingChat) {
             existingChat.insertAdjacentHTML('beforeend', userBubble + loadingBubble);
             existingChat.scrollTop = existingChat.scrollHeight;
@@ -1319,6 +1367,7 @@
                 const created = await Api.createSession();
                 state.currentSessionId = created.id;
                 state.pendingSession = null;
+                state._pendingSessionId = state.currentSessionId;
                 state._awaitingFirstResponse = true;
             }
 
@@ -1348,12 +1397,21 @@
     }
 
     async function _finishQuestion(wasPending) {
+        // run 所属会话（可能已被用户切走）
+        const runSessionId = _liveRunSessionId || state.currentSessionId;
         _removeLiveTrace();
         _removeLiveAnswer();
-        await loadQaHistory();
+        // 先清 pending 再加载历史，避免 renderHistoricalMessages 把进行中的气泡重新追加一次（重复消息）
         state._pendingUserBubble = null;
         state._pendingLoadingBubble = null;
+        state._pendingSessionId = null;
+        _liveRunSessionId = null;
+        _livePlan = null;
         state._awaitingFirstResponse = false;
+        // 仅当仍停留在该会话时刷新视图；已切走则由切回时的 loadQaHistory 兜底
+        if (state.currentSessionId === runSessionId) {
+            await loadQaHistory();
+        }
         if (wasPending) {
             await loadSessions();
         }
@@ -1365,6 +1423,8 @@
     let _liveTraceEl = null;     // 中间区域的实时 trace DOM 元素
     let _liveAnswerEl = null;    // 中间区域的实时回答 DOM 元素
     let _liveAnswerText = '';    // 累积的回答 token 文本
+    let _livePlan = null;        // 当前 live DAG 的 plan（切回会话时重绘用）
+    let _liveRunSessionId = null; // 当前 SSE run 所属 session（跨会话隔离）
 
     function _connectSSE(runId, onComplete) {
         // 关闭旧连接
@@ -1372,6 +1432,8 @@
             _currentRuntimeSource.close();
             _currentRuntimeSource = null;
         }
+        _liveRunSessionId = state.currentSessionId;
+        _livePlan = null;
 
         const token = localStorage.getItem('rag_token') || '';
         const runtimeSource = new EventSource(`/qa/runtime/${runId}?token=${encodeURIComponent(token)}`);
@@ -1386,6 +1448,7 @@
                 const msg = JSON.parse(event.data);
                 if (msg.data && msg.data.tasks) {
                     currentPlan = msg.data.tasks;
+                    _livePlan = msg.data.tasks;
                     _renderLiveDag(currentPlan);
                     // 初始化步骤数据：Planner（已完成）+ 其他任务（等待中）
                     _liveTraceSteps = [];
@@ -1479,6 +1542,8 @@
             _sseCompleted = true;
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _liveRunSessionId = null;
+            _livePlan = null;
             _removeLiveAnswer();
             if (onComplete) onComplete();
         });
@@ -1494,6 +1559,8 @@
             } catch (e) { /* 解析失败则用默认文本 */ }
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _liveRunSessionId = null;
+            _livePlan = null;
             _removeLiveAnswer();
             showToast(errorText, 'error');
             if (onComplete) onComplete();
@@ -1503,6 +1570,8 @@
             if (_sseCompleted) return;
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _liveRunSessionId = null;
+            _livePlan = null;
             // SSE 断开后延迟清理，兜底未收到 runtime_completed 的情况
             setTimeout(() => {
                 if (!_sseCompleted) {
@@ -1516,6 +1585,8 @@
 
     // 实时 trace：仅显示已开始的步骤（逐步追加）
     function _renderLiveTrace() {
+        // 只渲染到所属会话的视图，避免切走时串台
+        if (_liveRunSessionId !== state.currentSessionId) return;
         const container = els.agentTrace;
         // 只渲染已开始的步骤（running/completed/failed），跳过 pending
         const activeSteps = _liveTraceSteps.filter(s => s.status !== 'pending');
@@ -1589,6 +1660,8 @@
 
     // 流式回答：打字机效果，实时显示 Generator 输出
     function _renderLiveAnswer() {
+        // 只渲染到所属会话的视图，避免切走时串台
+        if (_liveRunSessionId !== state.currentSessionId) return;
         if (!_liveAnswerText) return;
 
         const container = els.agentTrace;
@@ -1629,6 +1702,8 @@
 
     // 实时渲染 DAG（所有节点初始为 pending）
     function _renderLiveDag(tasks) {
+        // 只渲染到所属会话的视图，避免覆盖其他会话的 DAG
+        if (_liveRunSessionId !== state.currentSessionId) return;
         if (!tasks || tasks.length === 0) return;
 
         let html = `
