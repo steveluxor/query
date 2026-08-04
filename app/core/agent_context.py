@@ -13,6 +13,7 @@ from app.models.task_graph import TaskGraph
 _task_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('agent_task_id', default='')
 # 消费者工具（calculate_sum/rank/read_all_rows）读取 search ctx 的来源 task_id：
 # 由 Orchestrator 按 DAG 依赖解析（上游"检索提供者"），空则用自身 task_id / 共享 search_ctx
+# （防御性：当前 planner 单检索 DAG 下恒为唯一检索的 task_id，见 _resolve_search_provider）
 _search_ctx_source_var: contextvars.ContextVar[str] = contextvars.ContextVar('search_ctx_source', default='')
 # 子任务 objective：并行分支各 task 经 contextvar 隔离（与 _task_id_var 同机制），
 # 共享字段 context.question 不再被覆盖，恒为用户原始问题

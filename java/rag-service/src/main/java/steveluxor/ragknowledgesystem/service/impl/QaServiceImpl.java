@@ -118,6 +118,30 @@ public class QaServiceImpl implements QaService {
         return proxySse(pythonBaseUrl + "/qa/runtime/" + runId, "runtime", runId);
     }
 
+    @Override
+    public Result stop(String runId) {
+        try {
+            HttpRequest httpReq = HttpRequest.newBuilder()
+                    .uri(URI.create(pythonBaseUrl + "/qa/stop"))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .timeout(Duration.ofSeconds(10))
+                    .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"run_id\": \"" + runId + "\"}", StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> httpResp = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofString());
+            if (httpResp.statusCode() == 200) {
+                log.info("[STOP] 停止请求已发送: runId={}", runId);
+                return Result.ok("停止请求已发送");
+            }
+            log.warn("[STOP] Python 返回异常: runId={}, status={}, body={}",
+                    runId, httpResp.statusCode(), httpResp.body());
+            return Result.fail("Python 停止失败: HTTP " + httpResp.statusCode());
+        } catch (Exception e) {
+            log.error("[STOP] 转发停止请求失败: runId={}, error={}", runId, e.getMessage());
+            return Result.fail("停止失败: " + e.getMessage());
+        }
+    }
+
     /**
      * 通用 SSE 透传：连接 Python SSE 端点，逐行转发给前端
      * - 专用线程池执行，不占公共 ForkJoinPool

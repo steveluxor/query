@@ -57,6 +57,12 @@ public class QaController {
                 : ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(r);
     }
 
+    @PostMapping("/stop/{runId}")
+    public Result stop(@PathVariable("runId") String runId) {
+        log.info("用户停止问答: runId={}", runId);
+        return qaService.stop(runId);
+    }
+
     @GetMapping("/sessions")
     public Result getSessions() {
         Long userId = CurrentUser.get();

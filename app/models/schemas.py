@@ -28,3 +28,8 @@ class QuestionRequest(BaseModel):
     session_id: str | None = None
     strategy: str | None = None  # relevance / diversity / None(自动判断)
     preferences: dict | None = None  # Java 从数据库传来的已存储偏好
+
+
+class StopRequest(BaseModel):
+    """停止正在进行的问答"""
+    run_id: str

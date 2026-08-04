@@ -8,28 +8,61 @@
 
 ## Demo
 
-**用户输入：** 分析三个实验报告的差异，生成趋势图并总结结论
+### 流程 1：数值分析 + 图表生成
+
+**用户输入：** 统计各品牌的花费金额占比，生成饼图，并总结哪个品牌花费最高
 
 **Planner 自动规划 DAG：**
 
 ```
               ┌─────────────┐
-              │  Retrieval  │  ← 并行检索
-              └──┬───┬───┬──┘
-                 │   │   │
-             Search1 Search2 Search3  ← 3 个并行检索任务
-                 │   │   │
-                 └─┬─┴─┬─┘
-                   │   │
-            ┌──────┴───┴──────┐
-            │    Extractor    │  ← Map-Reduce 知识抽取
-            └────────┬────────┘
+              │  Retrieval  │  ← 检索（单任务）
+              └──────┬──────┘
+                     │
+        ┌────────────┴────────────┐
+        │                         │
+   ┌────┴─────┐             ┌─────┴────┐
+   │ Analysis │             │ CodeAgent│  ← 并行执行（均依赖检索）
+   └────┬─────┘             └─────┬────┘
+        │                         │
+        └────────────┬────────────┘
                      │
               ┌──────┴──────┐
-         ┌────┴────┐  ┌─────┴─────┐
-         │Analysis │  │ CodeAgent │  ← 并行执行
-         └────┬────┘  └─────┬─────┘
-              │             │
+              │  Generator  │  ← SSE 逐 token 流式输出
+              └──────┬──────┘
+                     │
+              ┌──────┴──────┐
+              │   Critic    │  ← RuleValidator + LLM 两级审核
+              └─────────────┘
+```
+
+> 纯数值计算问题会被规则裁剪：问题含「最高」等数值关键词，`_post_process_plan` 规则 2 移除 extractor task（数值问题只需 analysis 结果即可回答）。
+
+**执行结果（3 轮实测，各阶段取最短）：**
+
+| Agent | 耗时 | 产出 |
+|-------|------|------|
+| Planner | 18.3s | DAG（extractor 被规则裁剪） |
+| Retrieval | 2.7s | 140 chunks（账.xlsx 全量） |
+| Analysis | 18.8s | 各品牌花费金额排名 |
+| CodeAgent | 16.1s | 饼图 PNG |
+| Generator | 2.8s | 分析报告 |
+| Critic | 2.0s | RuleValidator 通过 + LLM 评分 8.0 |
+| **总计** | **~45s** | 完整分析报告（Analysis ∥ CodeAgent 并行） |
+
+### 流程 2：文档对比 + 知识抽取
+
+**用户输入：** 对比按键中断、定时器控制、ARM 汇编这三份实验报告，分析各自的实验目的、所用硬件设备和程序实现思路，总结三份报告的差异
+
+**Planner 自动规划 DAG：**
+
+```
+              ┌─────────────┐
+              │  Retrieval  │  ← 检索（单任务）
+              └──────┬──────┘
+                     │
+              ┌──────┴──────┐
+              │  Extractor  │  ← Map-Reduce 知识抽取
               └──────┬──────┘
                      │
               ┌──────┴──────┐
@@ -41,17 +74,18 @@
               └─────────────┘
 ```
 
-**执行结果：**
+**执行结果（3 轮实测，各阶段取最短）：**
 
 | Agent | 耗时 | 产出 |
 |-------|------|------|
-| Planner | 1.2s | 5 节点 DAG |
-| Retrieval | 2.5s | 42 条证据 |
-| Extractor | 8.4s | 42 个知识对象 |
-| CodeAgent | 5.1s | 趋势图 PNG |
-| Generator | 2.0s | 分析报告 |
-| Critic | <2s | RuleValidator 通过 + LLM 评分 9.2 |
-| **总计** | **~21s** | 完整多模态分析报告 |
+| Planner | 6.8s | 4 节点 DAG |
+| Retrieval | 3.4s | 3 份实验报告全文 |
+| Extractor | 46.7s | 22 个知识对象 / 12 条证据 |
+| Generator | 16.5s | 对比分析报告 |
+| Critic | 1.0s | RuleValidator 通过 + LLM 审核 |
+| **总计** | **~74s** | 三份实验报告差异对比报告 |
+
+> **以上为实测（N=3，各阶段取最短值）；总计为合成下界（非单轮实测）。** DeepSeek 高延迟下单轮实际可达 55-108s，波动较大。
 
 ---
 
@@ -161,6 +195,7 @@ POST /qa/callback          ← Python → Java 持久化（X-Callback-Token 鉴�
 - **双端心跳保活**：Python `: ping`（asyncio.wait_for 15s 超时）+ Java SseEmitter comment（15s 调度），规避 Nginx/proxy 空闲断连
 - **callback 鉴权容错**：Python 携带 `X-Callback-Token` 调用 `/qa/callback`，Java 校验失败 → 发 `RUNTIME_ERROR` 不回 `RUNTIME_COMPLETED`；完成载荷精简为仅 `session_id`
 - **并发隔离**：并行分支 DAG 按依赖锁定上游"检索提供者"（`ctx_source_id`），各任务读写独立 search context，不串台
+- **手动停止**：回答过程中点「停止」→ `POST /qa/stop/{runId}` 经 Java 转发 Python，先发 `RUNTIME_CANCELLED`（SSE 流结束）再 `task.cancel()`；取消的 run 不持久化，无半成品记录
 
 前端实时显示：DAG 节点状态变化 + Agent Trace 逐步展开 + 标签页切换查看完整结果；切换会话再切回可恢复进行中过程视图。
 
@@ -178,7 +213,7 @@ Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字�
 
 ### 9. 并行分支 DAG 检索上下文隔离
 
-并行分支各 task 通过 contextvars 隔离任务上下文，MCP 按 DAG 依赖锁定上游"检索提供者"（`ctx_source_id`），串行链式场景复用共享检索结果。保证并行检索互不覆盖、数据流正确注入。
+并行分支各 task 通过 contextvars 隔离任务上下文，MCP 按 DAG 依赖锁定上游"检索提供者"（`ctx_source_id`），串行链式场景复用共享检索结果。**防御性保留**：当前 planner 只生成单检索 DAG，该隔离机制实际不触发，仅在出现多并行检索分支时保证互不覆盖、数据流正确注入。
 
 ### 10. 检索相关性过滤 + 数据范围收敛
 
@@ -292,3 +327,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 实现 CodeAgent Sandbox，通过进程隔离、资源限制和模块白名单降低 LLM 生成代码执行风险
 - 优化 LLM 推理管线：Extractor 输出精简（attributes 短语化 + evidence 核心断言），Generator token budget，Critic slim prompt，全链路 Token Metrics
 - 可靠性加固：全局 LLM 超时 120s 消除慢 API 重试空转；搜索相关性过滤写回上下文收敛下游数据范围；模板花括号转义防 KeyError
+- 实现用户手动停止：回答过程中随时中断 DAG，先发取消事件（SSE 流干净结束）再取消 asyncio 任务，取消的 run 跳过持久化不产生半成品记录

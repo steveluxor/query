@@ -18,6 +18,7 @@ class EventType(str, Enum):
     CONTROL_ACTION = "control_action"      # Critic retry 等控制信号
     RUNTIME_COMPLETED = "runtime_completed"
     RUNTIME_ERROR = "runtime_error"
+    RUNTIME_CANCELLED = "runtime_cancelled"  # 用户手动停止，SSE 流结束信号
 
     # Generation Layer（高频，token 增量）
     TOKEN_CHUNK = "token_chunk"

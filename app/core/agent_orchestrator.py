@@ -255,6 +255,10 @@ class AgentOrchestrator:
         消费者工具（calculate_sum/rank/read_all_rows）不自己搜索，依赖上游检索产生的
         SearchContext。并行分支 DAG 下共享 search_ctx 会被最后一次搜索覆盖，必须按
         依赖关系锁定提供者。数据驱动：通过 capability.tools 判断，不硬编码 agent 名。
+
+        防御性保留：当前 planner（prompts.yaml）所有示例均为单 retrieval DAG，此函数
+        恒解析到唯一检索，与共享 search_ctx 等价；仅在 planner 未来生成多并行检索分支
+        时才有实际作用，勿删。
         """
         plan = context.plan
         if not plan:

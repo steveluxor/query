@@ -136,6 +136,12 @@ const Api = (() => {
             });
         },
 
+        stop(runId) {
+            return request(`/qa/stop/${encodeURIComponent(runId)}`, {
+                method: 'POST',
+            });
+        },
+
         getQaHistory(sessionId) {
             return request(`/qa/history?sessionId=${sessionId}`);
         },

@@ -125,6 +125,7 @@ class ExtractionAgent(BaseAgent):
 
     async def _extract_single_source(self, source: str, chunks: list, question: str) -> tuple[list[KnowledgeObject], list[Evidence]]:
         """对单个文档执行 LLM 提取，大文档自动分批并行处理"""
+        logger.info("[Extractor] 文档 '%s' 开始提取 (%d chunks)", source, len(chunks))
         batch_size = 15
 
         system_prompt = self.FALLBACK_SYSTEM_PROMPT
@@ -133,7 +134,7 @@ class ExtractionAgent(BaseAgent):
         except Exception:
             pass
 
-        llm = create_llm(temperature=0, max_tokens=8192, timeout=120)
+        llm = create_llm(temperature=0, max_tokens=4096, timeout=120)
 
         # 创建所有批次的任务（并行执行，用 semaphore 限制并发数防限流）
         sem = asyncio.Semaphore(100)

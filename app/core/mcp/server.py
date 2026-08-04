@@ -28,7 +28,9 @@ def _get_search_ctx(session, task_id: str, ctx_source_id: str = ""):
     """获取 task 隔离的 SearchContext，查找顺序：
     1. ctx_source_id（消费者工具锁定的上游"检索提供者"，并行分支 DAG 下隔离正确性）
     2. 自身 task_id 的搜索上下文
-    3. 共享 search_ctx（串行链式场景：analysis 复用上游 retrieval 的结果）"""
+    3. 共享 search_ctx（串行链式场景：analysis 复用上游 retrieval 的结果）
+
+    （防御性：当前 planner 单检索 DAG 下 1/2 级恒命中同一 ctx，等价于 3 级共享 search_ctx。）"""
     if ctx_source_id and session.search_contexts.get(ctx_source_id):
         return session.search_contexts[ctx_source_id]
     if task_id and session.search_contexts.get(task_id):

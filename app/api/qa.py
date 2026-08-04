@@ -12,9 +12,9 @@ from app.config import settings
 from app.core.agent_memory import AgentMemory
 from app.core.agent_orchestrator import AgentOrchestrator
 from app.core.agent_context import AgentContext
-from app.core.runtime_event_bus import RuntimeEventBus, EventType
+from app.core.runtime_event_bus import RuntimeEvent, RuntimeEventBus, EventType
 from app.models.data_types import CodeResult
-from app.models.schemas import QuestionRequest
+from app.models.schemas import QuestionRequest, StopRequest
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
                 event_type = event.type.value
                 payload = json.dumps({"type": event_type, "data": event.data})
                 yield f"event: {event_type}\ndata: {payload}\n\n"
-                if event.type in (EventType.RUNTIME_COMPLETED, EventType.RUNTIME_ERROR):
+                if event.type in (EventType.RUNTIME_COMPLETED, EventType.RUNTIME_ERROR, EventType.RUNTIME_CANCELLED):
                     break
         except asyncio.CancelledError:
             pass
@@ -103,6 +103,22 @@ async def stream_runtime(run_id: str, event_bus: RuntimeEventBus = Depends(get_e
             event_bus.unsubscribe(run_id, queue)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/stop")
+async def stop_qa(req: StopRequest, event_bus: RuntimeEventBus = Depends(get_event_bus)):
+    """用户手动停止正在进行的问答：先发取消事件（SSE 流结束），再取消后台任务"""
+    task = _active_tasks.get(req.run_id)
+    if not task or task.done():
+        logger.info("[QA] stop: run_id=%s 已不活跃", req.run_id)
+        return {"ok": False, "reason": "run not active"}
+
+    # 先发 RUNTIME_CANCELLED：所有 SSE 订阅者收到后 break，流自然结束
+    await event_bus.publish(RuntimeEvent(req.run_id, EventType.RUNTIME_CANCELLED, {"reason": "user_stopped"}))
+    # 再取消后台 DAG 任务（取消后不 emit completed/error，半成品不持久化）
+    task.cancel()
+    logger.info("[QA] stop: run_id=%s 已取消", req.run_id)
+    return {"ok": True}
 
 
 async def _run_and_emit(

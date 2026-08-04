@@ -2,7 +2,7 @@
 
 > ⚠️ **本文档描述的是 v3 架构（Coordinator→Knowledge→Generate→Critic），已过时。**
 > 当前架构为 **v11 Planner + DAG Multi-Agent Runtime**（retrieval/extractor/analysis/code/generator/critic/chat + Java SSE 透传），
-> 完整架构见 [docs/archive/CLAUDE_MultiAgent_v11.md](docs/archive/CLAUDE_MultiAgent_v11.md)。
+> 完整架构见 [docs/archive/CLAUDE_MultiAgent_v11.md](archive/CLAUDE_MultiAgent_v11.md)。
 > 下文"Multi-Agent 信息流 / 项目结构 / 文件与函数详解"等章节仅作历史参考，实际以 v11 文档和代码为准。
 
 ## 系统架构

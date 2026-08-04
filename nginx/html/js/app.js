@@ -68,6 +68,7 @@
         // 问答 - Agent Workspace
         qaInput: $('#qaInput'),
         qaSendBtn: $('#qaSendBtn'),
+        qaStopBtn: $('#qaStopBtn'),
         qaStrategyGroup: $('#qaStrategyGroup'),
         agentTrace: $('#agentTrace'),
         resultWorkspace: $('#resultWorkspace'),
@@ -1311,6 +1312,43 @@
         }
     }
 
+    function _setQaRunning(running) {
+        qaLoading = running;
+        els.qaSendBtn.disabled = running;
+        els.qaStopBtn.style.display = running ? '' : 'none';
+    }
+
+    function _cleanupLiveRun() {
+        if (_currentRuntimeSource) {
+            _currentRuntimeSource.close();
+            _currentRuntimeSource = null;
+        }
+        _currentRunId = null;
+        _liveRunSessionId = null;
+        _livePlan = null;
+        _liveTraceSteps = [];
+        _removeLiveAnswer();
+        _removeLiveTrace();
+        state._pendingUserBubble = null;
+        state._pendingLoadingBubble = null;
+        state._pendingSessionId = null;
+        const loadingEl = document.getElementById('loadingBubble');
+        if (loadingEl) loadingEl.remove();
+        _setQaRunning(false);
+    }
+
+    async function handleStopQuestion() {
+        if (_sseCompleted) return;
+        _sseCompleted = true;
+        const runId = _currentRunId;
+        _cleanupLiveRun();
+        showToast('已停止回答', 'info');
+        if (runId) {
+            try { await Api.stop(runId); } catch (e) { /* 忽略 */ }
+        }
+        if (state.currentSessionId) await loadQaHistory();
+    }
+
     async function handleSendQuestion() {
         const question = els.qaInput.value.trim();
         if (!question) {
@@ -1353,8 +1391,7 @@
         _removeLiveAnswer();
 
         try {
-            qaLoading = true;
-            els.qaSendBtn.disabled = true;
+            _setQaRunning(true);
 
             const strategyValues = [null, 'diversity', 'relevance'];
             const activeBtn = els.qaStrategyGroup.querySelector('.qa-strategy-btn.active');
@@ -1389,14 +1426,14 @@
             const loadingEl = document.getElementById('loadingBubble');
             if (loadingEl) loadingEl.remove();
             state._awaitingFirstResponse = false;
+            _setQaRunning(false);
             showToast(err.message || '执行失败', 'error');
-        } finally {
-            qaLoading = false;
-            els.qaSendBtn.disabled = false;
         }
     }
 
     async function _finishQuestion(wasPending) {
+        // run 已结束，恢复发送按钮、隐藏停止按钮
+        _setQaRunning(false);
         // run 所属会话（可能已被用户切走）
         const runSessionId = _liveRunSessionId || state.currentSessionId;
         _removeLiveTrace();
@@ -1419,6 +1456,8 @@
 
     // SSE 双流：实时 DAG + Agent 进度
     let _currentRuntimeSource = null;
+    let _currentRunId = null;    // 当前 SSE run 的 run_id（供停止按钮用）
+    let _sseCompleted = false;   // 本次 run 是否已结束（completed/error/cancelled/stop 任一）
     let _liveTraceSteps = [];    // 当前执行的 trace 步骤
     let _liveTraceEl = null;     // 中间区域的实时 trace DOM 元素
     let _liveAnswerEl = null;    // 中间区域的实时回答 DOM 元素
@@ -1432,6 +1471,8 @@
             _currentRuntimeSource.close();
             _currentRuntimeSource = null;
         }
+        _currentRunId = runId;
+        _sseCompleted = false;
         _liveRunSessionId = state.currentSessionId;
         _livePlan = null;
 
@@ -1440,7 +1481,6 @@
         _currentRuntimeSource = runtimeSource;
         let currentPlan = null;
         _liveAnswerText = '';
-        let _sseCompleted = false;
 
         // 监听自定义事件（plan_generated 等）
         runtimeSource.addEventListener('plan_generated', (event) => {
@@ -1542,6 +1582,7 @@
             _sseCompleted = true;
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _currentRunId = null;
             _liveRunSessionId = null;
             _livePlan = null;
             _removeLiveAnswer();
@@ -1559,6 +1600,7 @@
             } catch (e) { /* 解析失败则用默认文本 */ }
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _currentRunId = null;
             _liveRunSessionId = null;
             _livePlan = null;
             _removeLiveAnswer();
@@ -1566,10 +1608,19 @@
             if (onComplete) onComplete();
         });
 
+        // 用户手动停止：Python 先发布取消事件，SSE 流自然结束
+        runtimeSource.addEventListener('runtime_cancelled', () => {
+            if (_sseCompleted) return;
+            _sseCompleted = true;
+            _cleanupLiveRun();
+            showToast('已停止回答', 'info');
+        });
+
         runtimeSource.onerror = () => {
             if (_sseCompleted) return;
             runtimeSource.close();
             _currentRuntimeSource = null;
+            _currentRunId = null;
             _liveRunSessionId = null;
             _livePlan = null;
             // SSE 断开后延迟清理，兜底未收到 runtime_completed 的情况
@@ -2185,6 +2236,7 @@
 
         // 问答
         els.qaSendBtn.addEventListener('click', handleSendQuestion);
+        els.qaStopBtn.addEventListener('click', handleStopQuestion);
         els.qaInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') handleSendQuestion();
         });

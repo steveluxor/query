@@ -35,6 +35,7 @@
 | 前端重复消息 | 回答完成后同一轮出现两遍 | **[v12: 修复]** `_finishQuestion` 先清 pending 再加载历史 |
 | 会话列表排序 | 按 id 倒序 | **[v12: 修改]** 按 update_time（Java 每轮刷新 + 前端排序）|
 | 会话切换 | 进行中 DAG/trace/回答丢失 | **[v12: 修复]** 切回时恢复实时过程视图，且不串台 |
+| 手动停止 | 无 | **[v12: 新增]** `POST /qa/stop/{runId}` 全链路，先发取消事件再取消任务，半成品不持久化 |
 
 ### 架构升级路线
 
@@ -163,6 +164,7 @@ v12 (SSE 单流 + 并发隔离 + 可靠性加固):
   [v12: 修改] 搜索相关性过滤写回 search context: ctx.last_search_chunks 仅保留相关文档 + last_search_all_chunks 置空使惰性缓存失效，read_all_rows/calculate_* 只看到相关文档
   [v12: 修复] relevance.judge 模板花括号转义: {"relevant_ids":...} → {{...}}，修复 str.format KeyError
   [v12: 新增] Code prompt 数据范围守卫: 按 `文件` 字段只使用与 question 直接相关的文档数据，忽略无关文档（账单/清单等）
+  [v12: 新增] 用户手动停止: POST /qa/stop/{runId} 全链路 + RUNTIME_CANCELLED 事件 + 先发事件后 cancel（避免 CancelledError 下再 await）+ 取消不持久化
 ```
 
 ---
@@ -391,6 +393,70 @@ public ResponseEntity<?> callback(@RequestBody Map<String, Object> body,
     return ResponseEntity.ok(qaService.handleCallback(body));
 }
 ```
+
+---
+
+## 用户手动停止
+
+### 问题背景
+
+Planner + 多 Agent DAG 一轮执行可能耗时 30s-150s（长 Planner、Extractor 并行提取、Generator 长文生成）。等待期间用户无法中断，只能干等。需要随时终止本次问答，且终止后不留半成品记录。
+
+### 事件流
+
+```
+用户点「停止」
+  → 前端 POST /qa/stop/{runId} (Java)
+  → Java 转发 Python POST /qa/stop (body: {"run_id": runId})
+  → Python: 先 publish RUNTIME_CANCELLED（所有 SSE 订阅者收到 → 流 break 结束）
+  → 再 task.cancel()（中断后台 DAG 执行）
+  → 取消的 run 不走 callback → 半成品不持久化
+```
+
+### 为什么先发取消事件、后取消任务
+
+asyncio 下任务一旦处于取消态（cancelling），后续 `await` 会**立即重抛 CancelledError**。若先 `task.cancel()` 再 `await event_bus.publish(...)`，publish 永远不会完成。因此顺序必须是：先发布 `RUNTIME_CANCELLED` 让所有 SSE 订阅者退出，再 `task.cancel()`。
+
+**Python**（`app/api/qa.py`）：
+
+```python
+@router.post("/stop")
+async def stop_qa(req: StopRequest, event_bus: RuntimeEventBus = Depends(get_event_bus)):
+    task = _active_tasks.get(req.run_id)
+    if not task or task.done():
+        return {"ok": False, "reason": "run not active"}
+    # 1. 先发取消事件：所有 SSE 订阅者 break，流自然结束
+    await event_bus.publish(RuntimeEvent(req.run_id, EventType.RUNTIME_CANCELLED, {"reason": "user_stopped"}))
+    # 2. 再取消后台 DAG 任务（取消后不 emit completed/error，半成品不持久化）
+    task.cancel()
+    return {"ok": True}
+```
+
+SSE 流终止条件（`stream_runtime`）加入 `RUNTIME_CANCELLED`：
+
+```python
+if event.type in (EventType.RUNTIME_COMPLETED, EventType.RUNTIME_ERROR, EventType.RUNTIME_CANCELLED):
+    break
+```
+
+### Java 不需要主动断流
+
+Java 不维护 run→emitter 注册表。Python 取消后 SSE 流自然结束，`proxySse` 读线程读到 EOF → `emitter.complete()`。前端停止时已本地关闭 EventSource，Java 转发途中 `emitter.send` 失败会捕获并 break（`proxySse` 已内置容错），连接由 `onCompletion` 统一清理。
+
+### 前端：按钮生命周期由 run 终结事件驱动
+
+停止按钮在**整个 run 期间常显**（`_setQaRunning(true)`）。复位不放在 `handleSendQuestion` 的 `finally`——因为 `_connectSSE` 只是注册监听器就返回，此时 run 仍在执行。按钮复位统一由终结事件处理：
+
+| 路径 | 复位 |
+|------|------|
+| runtime_completed / runtime_error / 连接断开兜底 | `_finishQuestion` → `_setQaRunning(false)` |
+| runtime_cancelled / 用户点停止 | `_cleanupLiveRun` → `_setQaRunning(false)` |
+| ask 请求本身失败 | catch 块 `_setQaRunning(false)` |
+
+### 已知限制
+
+- 同步 `llm.invoke()`（Planner / Chat）取消需等当前 LLM 调用返回才生效
+- `CodeExecutor` 子进程仅在超时（TimeoutError）时 kill，取消时不一定立即回收
 
 ---
 
