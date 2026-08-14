@@ -515,3 +515,88 @@ class TestCriticRetry:
         assert call_counts["critic"] == 1, f"critic 应执行1次，实际{call_counts['critic']}"
 
         assert result.get_output("answer") == "答案"
+
+
+# ==================== Task 重编号 ====================
+
+class TestRenumberTasks:
+
+    def test_numeric_dag_renumbered_sequentially(self, orchestrator):
+        """非连续 id 的数值 DAG：按依赖拓扑顺序重编号为 task1..taskN 并重排数组"""
+        plan = TaskGraph(
+            goal="", goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task4", agent="analysis", objective="计算", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="回答", depends_on=["task4"]),
+                TaskNode(id="task5", agent="critic", objective="审核", depends_on=["task3"]),
+            ],
+        )
+        orchestrator._renumber_tasks(plan)
+
+        # 数组顺序 == id 顺序 == 依赖顺序
+        assert [t.id for t in plan.tasks] == ["task1", "task2", "task3", "task4"]
+        assert [t.agent for t in plan.tasks] == ["retrieval", "analysis", "generator", "critic"]
+        by_id = {t.id: t for t in plan.tasks}
+        assert by_id["task1"].depends_on == []
+        assert by_id["task2"].depends_on == ["task1"]
+        assert by_id["task3"].depends_on == ["task2"]
+        assert by_id["task4"].depends_on == ["task3"]
+
+    def test_port_bindings_rewritten(self, orchestrator):
+        """port_bindings 的 source_task_id 前缀随重编号改写，output_key 不动"""
+        plan = TaskGraph(
+            goal="", goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task4", agent="analysis", objective="计算", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="回答", depends_on=["task4"],
+                         port_bindings={"analysis_result": "task4.analysis",
+                                        "documents": "task1.document_bundle"}),
+                TaskNode(id="task5", agent="critic", objective="审核", depends_on=["task3"],
+                         port_bindings={"generated_answer": "task3.answer"}),
+            ],
+        )
+        orchestrator._renumber_tasks(plan)
+
+        by_id = {t.id: t for t in plan.tasks}
+        assert by_id["task3"].port_bindings["analysis_result"] == "task2.analysis"
+        assert by_id["task3"].port_bindings["documents"] == "task1.document_bundle"
+        assert by_id["task4"].port_bindings["generated_answer"] == "task3.answer"
+
+    def test_already_sequential_plan_idempotent(self, orchestrator):
+        """已顺序编号的 plan 重编号后不变"""
+        plan = TaskGraph(
+            goal="", goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task2", agent="extractor", objective="提取", depends_on=["task1"]),
+                TaskNode(id="task3", agent="generator", objective="回答", depends_on=["task2"]),
+            ],
+        )
+        orchestrator._renumber_tasks(plan)
+
+        assert [t.id for t in plan.tasks] == ["task1", "task2", "task3"]
+        assert [t.agent for t in plan.tasks] == ["retrieval", "extractor", "generator"]
+        assert plan.tasks[2].depends_on == ["task2"]
+
+    def test_parallel_dag_keeps_stable_order(self, orchestrator):
+        """同层可并行 task 保持原相对顺序，依赖改写正确"""
+        plan = TaskGraph(
+            goal="", goal_outputs=["answer"],
+            tasks=[
+                TaskNode(id="task1", agent="retrieval", objective="检索", depends_on=[]),
+                TaskNode(id="task4", agent="analysis", objective="计算", depends_on=["task1"]),
+                TaskNode(id="task3", agent="extractor", objective="提取", depends_on=["task1"]),
+                TaskNode(id="task5", agent="generator", objective="回答",
+                         depends_on=["task4", "task3"]),
+            ],
+        )
+        orchestrator._renumber_tasks(plan)
+
+        assert [t.id for t in plan.tasks] == ["task1", "task2", "task3", "task4"]
+        assert [t.agent for t in plan.tasks] == ["retrieval", "analysis", "extractor", "generator"]
+        by_id = {t.id: t for t in plan.tasks}
+        assert by_id["task2"].depends_on == ["task1"]          # analysis
+        assert by_id["task3"].depends_on == ["task1"]          # extractor
+        assert by_id["task4"].depends_on == ["task2", "task3"]  # generator

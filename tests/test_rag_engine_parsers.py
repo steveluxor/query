@@ -7,7 +7,7 @@ from app.core.rag_engine import RAGEngine, SearchContext
 
 class TestParseRowFilter:
     def setup_method(self):
-        self.engine = RAGEngine.__new__(RAGEngine)
+        self.engine = RAGEngine(vector_store=MagicMock())
 
     def test_le(self):
         assert self.engine._parse_row_filter("前10行") == ("le", 10)
@@ -79,7 +79,7 @@ class TestIsEmptyRecord:
 
 class TestDetermineTopK:
     def setup_method(self):
-        self.engine = RAGEngine.__new__(RAGEngine)
+        self.engine = RAGEngine(vector_store=MagicMock())
         self.engine.MIN_GAP_THRESHOLD = 0.05
 
     def test_few_items(self):
@@ -104,7 +104,7 @@ class TestDetermineTopK:
 
 class TestSelectByDiversity:
     def setup_method(self):
-        self.engine = RAGEngine.__new__(RAGEngine)
+        self.engine = RAGEngine(vector_store=MagicMock())
 
     def test_basic_diversity(self):
         docs = []

@@ -1,8 +1,9 @@
 """AnalysisAgent 单元测试"""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from app.core.agent_context import AgentContext
 from app.core.agents.analysis_agent import AnalysisAgent
@@ -33,27 +34,32 @@ VALID_ANALYSIS_JSON = '''{
 }'''
 
 
-@pytest.mark.anyio
-async def test_create_agent_import_exists():
-    """验证 create_agent 可导入"""
-    from langchain.agents import create_agent
-    assert callable(create_agent)
+def _mock_mcp(list_tools=None):
+    """返回 list_tools 为 AsyncMock 的假 MCP Client"""
+    mcp = MagicMock()
+    mcp.list_tools = AsyncMock(return_value=list_tools or [])
+    return mcp
+
+
+def _llm_returning(final_content: str):
+    """返回 ainvoke 结果为指定内容 AIMessage 的假 LLM（无工具调用）"""
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=AIMessage(content=final_content))
+    return llm
+
+
+def test_tool_loop_import_exists():
+    """验证原生工具循环模块可导入"""
+    from app.core.mcp.tool_loop import build_tool_schemas, run_tool_loop
+    assert callable(build_tool_schemas)
+    assert callable(run_tool_loop)
 
 
 @pytest.mark.anyio
 async def test_empty_result_on_parse_failure(agent, context):
     """LLM 返回无效内容时返回空的 AnalysisResult"""
-    mock_llm = MagicMock()
-    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="不是JSON"))
-
-    # Mock create_agent 返回的对象
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={
-        "messages": [MagicMock(type="ai", tool_calls=None, content="不是JSON")],
-    })
-
-    with patch("app.core.agents.analysis_agent.create_agent", return_value=mock_agent):
-        await agent.run(context, mcp_client=MagicMock(), mcp_session_id="s1")
+    agent.llm = _llm_returning("不是JSON")
+    await agent.run(context, mcp_client=_mock_mcp(), mcp_session_id="s1")
 
     analysis = context.get_output("analysis")
     assert isinstance(analysis, AnalysisResult)
@@ -63,13 +69,8 @@ async def test_empty_result_on_parse_failure(agent, context):
 @pytest.mark.anyio
 async def test_analysis_parses_content(agent, context):
     """正常解析 AnalysisResult"""
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={
-        "messages": [MagicMock(type="ai", tool_calls=None, content=VALID_ANALYSIS_JSON)],
-    })
-
-    with patch("app.core.agents.analysis_agent.create_agent", return_value=mock_agent):
-        await agent.run(context, mcp_client=MagicMock(), mcp_session_id="s1")
+    agent.llm = _llm_returning(VALID_ANALYSIS_JSON)
+    await agent.run(context, mcp_client=_mock_mcp(), mcp_session_id="s1")
 
     analysis = context.get_output("analysis")
     assert isinstance(analysis, AnalysisResult)

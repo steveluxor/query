@@ -593,7 +593,52 @@ class AgentOrchestrator:
                 plan.tasks.append(critic_task)
                 logger.info("[Orchestrator] 自动追加 critic task: %s", critic_task.id)
 
+        # === 规则 4：按依赖拓扑顺序重编号 + 重排数组，保证 id 顺序 == 数组顺序 == 执行顺序 ===
+        self._renumber_tasks(plan)
+
         return plan
+
+    def _renumber_tasks(self, plan: TaskGraph):
+        """按依赖拓扑顺序重排 task 并重编号为 task1..taskN，保证
+        id 顺序 == 数组顺序 == 依赖/执行顺序。
+
+        task_id 全部在单次运行内从本 plan 对象派生（MCP task_id/ctx_source_id 注入、
+        SSE 事件、输出存取、get_descendants 均基于 t.id/t.depends_on），统一改名后
+        全链路自洽；末尾自检防漏改，杜绝静默带病运行。
+        """
+        if not plan.tasks:
+            return
+
+        # 深度 = 依赖链最长路径；按深度稳定排序（同层保持原相对顺序）即得拓扑序
+        depth = self.workflow_validator.get_layers(plan)
+        ordered = sorted(plan.tasks, key=lambda t: depth.get(t.id, 0))
+
+        old_to_new = {}
+        for i, t in enumerate(ordered, start=1):
+            old_to_new[t.id] = f"task{i}"
+
+        new_ids = set(old_to_new.values())
+        for t in ordered:
+            t.id = old_to_new[t.id]
+            t.depends_on = [old_to_new.get(d, d) for d in t.depends_on]
+            for port, ref in t.port_bindings.items():
+                if "." in ref:
+                    src, out = ref.split(".", 1)
+                    t.port_bindings[port] = f"{old_to_new.get(src, src)}.{out}"
+
+        # 自检：所有依赖/绑定引用必须解析到新 id 集合
+        for t in ordered:
+            for d in t.depends_on:
+                if d not in new_ids:
+                    raise WorkflowValidationError(
+                        f"[Orchestrator] task {t.id} 依赖 {d} 不在重编号后的 plan 中")
+            for ref in t.port_bindings.values():
+                src = ref.split(".", 1)[0]
+                if src not in new_ids:
+                    raise WorkflowValidationError(
+                        f"[Orchestrator] task {t.id} port_binding '{ref}' 来源 {src} 不在重编号后的 plan 中")
+
+        plan.tasks = ordered
 
     def _validate_task_graph(self, plan: TaskGraph) -> bool:
         errors = []

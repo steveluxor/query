@@ -9,6 +9,7 @@
 | 前端 | `nginx/html/` | Nginx + 原生 HTML/CSS/JS | :8080 |
 | Java 后端 | `java/` | Spring Boot + MyBatis | :8085 |
 | Python AI 服务 | `app/` | FastAPI + LangChain + ChromaDB | :8000 |
+| Stream Consumer | `app/stream_consumer.py` | Python + pika（RabbitMQ 消费者）| 无（独立容器）|
 
 **请求流向：** 前端(:8080) → Nginx → Java(:8085) → Python(:8000)
 
@@ -40,6 +41,19 @@
 ### 架构升级路线
 
 ```
+v1 (Multi-Agent 应用):
+  Coordinator → Knowledge → Analysis → Generate → Critic 线性链
+  AgentContext = 业务字段集合（evidence/sources/analysis/answer）
+  Orchestrator 硬编码调度逻辑
+  无 DAG、无校验、无 Planner
+
+v2 (DAG 能力注册):
+  AgentCapability: 输入输出 Schema 声明
+  TaskGraph: DAG 数据结构（拓扑排序执行）
+  AgentRegistry: 能力注册表（校验 Agent 可用性）
+  Planner: LLM 生成 TaskGraph（简单模式仍走线性链）
+  Orchestrator 读 Registry + 执行 TaskGraph
+
 v3 (Multi-Agent 应用):
   AgentContext = 业务字段集合
   set_evidence/set_sources/...
@@ -639,16 +653,17 @@ Extractor 输出精简 → Generator/Critic prompt 自动瘦身 → Token Metric
 
 | 指标 | 数值 |
 |------|------|
-| Python 代码 | ~4500 行 |
-| Java 代码 | ~2000 行 |
-| 前端代码 | ~2000 行 |
-| 领域 Agent | 7 个 |
-| MCP 工具 | 6 个 |
-| DAG 校验层 | 6 层 |
-| Docker 服务 | 9 个 |
-| 数据库 | MySQL + Redis + ChromaDB |
+| Python 代码 | ~6590 行 |
+| Java 代码 | ~2528 行 |
+| 前端代码 | ~4558 行 |
+| 领域 Agent | 7 个（Retrieval / Extraction / Analysis / Code / Critic / Chat / Base）|
+| MCP 工具 | 8 个（search / list / sum / rank / read_all / add / delete / set_ids）|
+| DAG 校验层 | 6 层（Structure / Capability / Goal / DataFlow / Policy / Rule）|
+| Docker 容器 | 9 个 |
+| 数据存储 | MySQL + Redis + MinIO + ChromaDB |
+| 消息队列 | RabbitMQ |
 | SSE 端点 | 1 个（经 Java 透传，单流）|
-| API 端点 | 16 个 |
+| API 端点 | ~30 个（Java 27 + Python 5，含内部 callback）|
 
 ---
 
@@ -659,14 +674,17 @@ Extractor 输出精简 → Generator/Critic prompt 自动瘦身 → Token Metric
                ├── /qa/runtime/* → Java(:8085) → Python(:8000)  ← SSE 透传（单流）
                ├── /qa/*         → Java(:8085) → Python(:8000)  ← API 转发 + callback 鉴权
                └── /charts/*    → Java(:8085)                   ← 图片代理
-                                    ↓
-                             Python(:8000)
-                               ├── Ollama(:11434) Embedding
-                               ├── ChromaDB(本地) 向量库
-                             Java(:8085)
-                               ├── MySQL 数据库
-                               ├── Redis(:6379) 缓存
-                               └── MinIO(:9000) 文件存储
+
+基础设施:
+  Python(:8000)
+    ├── Ollama(:11434) Embedding
+    └── ChromaDB（嵌入 python-ai 容器，共享 volume 持久化）
+  Java(:8085)
+    ├── MySQL(:3307) 数据库
+    ├── Redis(:6379) 缓存
+    └── MinIO(:9000) 文件存储
+  RabbitMQ(:5672) 消息队列
+    └── Stream Consumer 消费者（从队列取任务 → 下载文件 → 调 python-ai 向量化）
 ```
 
 ```bash
@@ -683,16 +701,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 | 层级 | 技术 |
 |------|------|
-| 后端框架 | Python 3.11 + FastAPI + asyncio |
+| 后端框架 | Python 3.12 + FastAPI + asyncio |
 | AI 核心 | LangChain + DeepSeek API + Ollama Embeddings |
-| 向量数据库 | ChromaDB |
+| 向量数据库 | ChromaDB（嵌入 python-ai 容器） |
 | 缓存 | Redis |
 | 关系数据库 | MySQL (Spring Boot + MyBatis) |
+| 消息队列 | RabbitMQ（文档向量化异步任务） |
 | 工具协议 | MCP (Model Context Protocol) |
 | 实时推送 | SSE 单流 + RuntimeEventBus + Java SseEmitter + 双端心跳 |
 | 文档存储 | MinIO |
 | 前端 | 原生 HTML/CSS/JavaScript + EventSource |
-| 容器化 | Docker Compose |
+| 容器化 | Docker Compose（9 个容器） |
 
 ---
 

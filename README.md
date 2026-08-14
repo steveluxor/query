@@ -154,6 +154,152 @@ RAG 仍然作为 Capability 存在（Retrieval Agent），而不是整个系统�
 
 ---
 
+## Agent 输入输出
+
+| Agent | Inputs | Outputs | 工具 |
+|-------|--------|---------|------|
+| **RetrievalAgent** | _(无端口声明，通过 `_task_objective_var` 获取任务目标)_ | `document_bundle`: DocumentBundle · `retrieval_report`: RetrievalReport | `search_documents` · `read_all_rows` |
+| **AnalysisAgent** | _(无端口声明)_ | `analysis`: AnalysisResult | `calculate_sum` · `calculate_rank` |
+| **ExtractionAgent** | `knowledge_document`: DocumentBundle _(required)_ | `knowledge_objects`: list[KnowledgeObject] · `evidence`: list[Evidence] · `sources`: list[dict] | _(无工具，纯 LLM Map-Reduce)_ |
+| **CodeAgent** | `document_bundle`: DocumentBundle | `code_result`: CodeResult | _(无工具，沙箱执行 LLM 生成的代码)_ |
+| **AnswerGenerator** | `structured_knowledge`: list[KnowledgeObject] · `evidence_list`: list[Evidence] · `source_meta`: list[dict] · `analysis_result`: AnalysisResult \| None · `code_result`: CodeResult \| None | `answer`: str _(SSE 流式输出)_ | _(无工具)_ |
+| **CriticAgent** | `evidence_list`: list · `generated_answer`: str · `retrieval_report`: RetrievalReport · `analysis_result`: AnalysisResult \| None _(前三项 required)_ | `critique`: str · `need_retry`: bool · `retry_target`: str | _(无工具，RuleValidator + LLM 两级审核)_ |
+| **ChatAgent** | _(无端口声明)_ | `answer`: str | _(无工具，纯 LLM 闲聊)_ |
+
+> `required_inputs` 为空的端口视为可选。port_bindings 根据类型自动匹配上游输出，上游未产出可选端口时不影响执行。
+
+---
+
+## 数据结构
+
+### 文档与检索
+
+**DocumentChunk** — 文档切片，检索结果的最小单位
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `source` | str | 文件名，如 `账.xlsx` |
+| `content` | str | chunk 文本内容 |
+| `chunk_index` | int | 在文档中的序号 |
+| `total_chunks` | int | 该文档的总 chunk 数 |
+
+**DocumentBundle** — 文档包，RetrievalAgent 的输出
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `chunks` | list[DocumentChunk] | 检索到的所有文档切片 |
+
+**RetrievalReport** — 检索完整性报告
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `sources` | list[str] | 搜到的文档名列表 |
+| `total_chunks` | int | 命中 chunk 总数 |
+| `returned_chunks` | int | 实际返回数 |
+| `is_complete` | bool | 是否已调 read_all_rows |
+| `read_all_rows_called` | bool | 是否调了全量读取 |
+| `searches_performed` | int | 搜索次数 |
+
+### 知识抽取
+
+**KnowledgeObject** — 结构化知识对象（Extractor 输出）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `topic` | str | 主题/实体名，如 "实验一"、"万代" |
+| `attributes` | dict | 结构化属性（短语化，非完整句子） |
+| `source` | str | 来源文档 |
+| `confidence` | float | 提取置信度 0-1 |
+
+**Evidence** — 事实证据（Extractor 输出）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `statement` | str | 核心断言，50-80 字，如 "2024年A产品销量70万" |
+| `source` | str | 来源文档 |
+| `evidence_type` | str | `"table"` / `"text"` / `"calculation"` |
+| `metadata` | dict | 可选元数据，如 `{"sheet": "Sheet1", "row": 12}` |
+
+### 分析与计算
+
+**Calculation** — 单次计算结果
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `operation` | str | `"sum"` / `"rank"` |
+| `field` | str | 计算字段，如 `"price"` |
+| `arguments` | dict | 过滤条件，如 `{"row_filter": "前10行"}` |
+| `result` | Any | 计算结果值 |
+| `source` | str | 来源文档 |
+
+**AnalysisResult** — 结构化分析输出（AnalysisAgent 输出）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `calculations` | list[Calculation] | 计算列表 |
+| `findings` | list[str] | 发现，如 "销量下降30%" |
+| `conclusions` | list[str] | 结论，如 "供应链影响较大" |
+
+**CodeResult** — 代码执行结果（CodeAgent 输出）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `code` | str | LLM 生成的 Python 代码 |
+| `output` | Any | result 变量的值 |
+| `stdout` | str | 标准输出 |
+| `error` | str | 错误信息 |
+| `success` | bool | 是否成功 |
+| `execution_time_ms` | int | 执行耗时 |
+| `retry_count` | int | 重试次数 |
+| `image_paths` | list[str] | 图表本地路径（临时） |
+| `image_data` | list[str] | base64 编码 PNG |
+
+### 审核与追踪
+
+**CriticResult** — 审核结果（Critic 内部使用）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `score` | int | 1-10 分 |
+| `problems` | list[str] | 发现的问题 |
+| `need_retry` | bool | 是否需要重试 |
+| `retry_target` | str | 重试目标：`"retrieval"` / `"generator"` / `"all"` |
+
+**AgentTrace** — 单个 Agent 的执行轨迹（前端 Agent Trace 逐步展开）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `task_id` | str | 关联 DAG 任务 ID |
+| `agent` | str | Agent 名称 |
+| `start_time` | str | 开始时间戳 |
+| `end_time` | str | 结束时间戳 |
+| `tools_called` | list[str] | 调用的工具列表 |
+| `input_summary` | str | 输入摘要 |
+| `output_summary` | str | 输出摘要 |
+
+**AgentOutput** — 输出条目包装层（context.set_output 内部）
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `value` | Any | 实际数据（上面任意类型） |
+| `producer` | str | 生产者 Agent 名 |
+| `version` | int | 写入次数（自动递增） |
+| `timestamp` | float | 写入时间 |
+| `metadata` | dict | 扩展元数据 |
+
+### 数据流总览
+
+```
+DocumentChunk → DocumentBundle → Extractor → KnowledgeObject + Evidence
+                                    ↓
+                    AnalysisAgent → AnalysisResult ─┐
+                    CodeAgent    → CodeResult    ──┤
+                                                   ↓
+                                    Generator → answer → Critic
+```
+
+---
+
 ## 核心设计亮点
 
 ### 1. 声明式 Agent Capability Contract
@@ -245,7 +391,7 @@ DeepSeek 高延迟下 30s 默认超时会让 SDK 自动重试 ×2，一次慢调
 
 | 指标 | 数值 |
 |------|------|
-| Python 代码 | ~4500 行 |
+| Python 代码 | ~6500 行 |
 | Java 代码 | ~2000 行 |
 | 前端代码 | ~2000 行 |
 | 领域 Agent | 7 个 |

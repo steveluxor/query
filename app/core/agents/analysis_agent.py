@@ -1,20 +1,22 @@
 import logging
 
-from langchain.agents import create_agent
-
 from app.core.agents.base_agent import BaseAgent
 from app.core.agent_context import AgentContext, _task_objective_var
+from app.core.infra.llm_factory import create_llm
 from app.core.mcp.client import MCPClient
-from app.core.mcp.tools import create_mcp_tools
+from app.core.mcp.tool_loop import run_tool_loop
 from app.core.prompts.prompt_manager import PromptManager
 from app.models.data_types import AnalysisResult, Calculation
 from app.models.capability import AgentCapability
 
 logger = logging.getLogger(__name__)
 
+# Analysis 可用的 MCP 工具（不暴露 search/list/管理类工具，保持 DAG 隔离）
+_ANALYSIS_TOOLS = ["read_all_rows", "calculate_sum", "calculate_rank"]
+
 
 class AnalysisAgent(BaseAgent):
-    """数据分析 Agent：通过 MCP 工具执行计算并输出结构化结果"""
+    """数据分析 Agent：LLM 自主调用 MCP 工具（read_all_rows/calculate_sum/calculate_rank）执行计算并输出结构化结果"""
 
     name = "Analysis"
     capability = AgentCapability(
@@ -37,27 +39,25 @@ class AnalysisAgent(BaseAgent):
         self.llm = llm
 
     async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "", **kwargs) -> AgentContext:
-        tools = create_mcp_tools(mcp_client, session_id=mcp_session_id, include=["read_all_rows", "calculate_sum", "calculate_rank"])
-
         system_prompt = PromptManager.get("analysis", "system")
 
         if context.memory_context:
             system_prompt += f"\n\n<长期记忆>\n{context.memory_context}\n</长期记忆>"
 
-        agent = create_agent(
-            model=self.llm,
-            tools=tools,
-            system_prompt=system_prompt,
-        )
+        llm = self.llm or create_llm()
+        user_prompt = _task_objective_var.get() or context.question
 
         try:
-            result = await agent.ainvoke(
-                {"messages": [("human", _task_objective_var.get() or context.question)]},
-                config={"recursion_limit": 15},
+            messages = await run_tool_loop(
+                llm=llm,
+                mcp_client=mcp_client,
+                session_id=mcp_session_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                tool_names=_ANALYSIS_TOOLS,
             )
 
-            raw_messages = result["messages"]
-            analysis = self._parse_analysis(raw_messages)
+            analysis = self._parse_analysis(messages)
             context.set_output("analysis", analysis, producer="analysis")
 
             logger.info("[Analysis] 提取 %d 个计算, %d 个发现",
@@ -71,7 +71,7 @@ class AnalysisAgent(BaseAgent):
         return context
 
     def _parse_analysis(self, messages) -> AnalysisResult:
-        """从 LLM 最终输出中解析 AnalysisResult JSON"""
+        """从消息列表中解析 AnalysisResult JSON（取最后一条无 tool_calls 的 AI 消息）"""
         for msg in reversed(messages):
             if hasattr(msg, "type") and msg.type == "ai" and not getattr(msg, "tool_calls", None):
                 content = msg.content

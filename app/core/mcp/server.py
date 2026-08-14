@@ -100,33 +100,38 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
                 summaries = await summary_cache.get_batch(list(doc_ids))
                 if summaries:
                     relevant_ids = await _judge_relevance(query, summaries)
-                    filtered_chunks = [
-                        (doc, score) for doc, score in chunks
-                        if doc.metadata.get("document_id") in relevant_ids
-                    ]
-                    if filtered_chunks and len(filtered_chunks) != len(chunks):
-                        # 写回 search context：让 read_all_rows/calculate_* 等下游工具只看到相关文档，
-                        # 否则无关文档（如账单）会全量泄漏给 analysis/code
-                        ctx.last_search_chunks = filtered_chunks
-                        ctx.last_search_all_chunks = []   # 使 _load_all_chunks 的惰性缓存失效，强制重载
-                        # 按与 _execute_search 一致的格式重建过滤后的文本
-                        context_parts = []
-                        for doc, _ in filtered_chunks:
-                            source_name = doc.metadata.get("file_name", "未知文档")
-                            sheet_name = doc.metadata.get("sheet_name")
-                            label = f"{source_name} / {sheet_name}" if sheet_name else source_name
-                            context_parts.append(f"[{label}]\n{doc.page_content}")
-                        filtered_text = "检索到以下相关内容：\n\n" + "\n\n".join(context_parts)
-                        # 保留数据不完整提示（read_all_rows 触发条件）
-                        if "只显示了部分数据" in raw_result:
-                            filtered_text += (
-                                "\n\n【重要】以上只显示了部分数据。"
-                                "你必须立即调用 read_all_rows 工具获取完整数据，不要跳过此步骤。"
-                                "在获取完整数据之前，不要生成最终回答。"
-                            )
-                        result["data"] = filtered_text
-                        result["filtered_by_summary"] = True
-                        logger.info("[MCP] 摘要过滤: %d -> %d 个文档", len(doc_ids), len(relevant_ids))
+                    # 安全阀：过滤比例过高时跳过（可能误判）
+                    if len(relevant_ids) < len(doc_ids) / 2:
+                        logger.info("[MCP] 摘要过滤过于激进 (%d/%d)，跳过过滤",
+                                     len(relevant_ids), len(doc_ids))
+                    else:
+                        filtered_chunks = [
+                            (doc, score) for doc, score in chunks
+                            if doc.metadata.get("document_id") in relevant_ids
+                        ]
+                        if filtered_chunks and len(filtered_chunks) != len(chunks):
+                            # 写回 search context：让 read_all_rows/calculate_* 等下游工具只看到相关文档，
+                            # 否则无关文档（如账单）会全量泄漏给 analysis/code
+                            ctx.last_search_chunks = filtered_chunks
+                            ctx.last_search_all_chunks = []   # 使 _load_all_chunks 的惰性缓存失效，强制重载
+                            # 按与 _execute_search 一致的格式重建过滤后的文本
+                            context_parts = []
+                            for doc, _ in filtered_chunks:
+                                source_name = doc.metadata.get("file_name", "未知文档")
+                                sheet_name = doc.metadata.get("sheet_name")
+                                label = f"{source_name} / {sheet_name}" if sheet_name else source_name
+                                context_parts.append(f"[{label}]\n{doc.page_content}")
+                            filtered_text = "检索到以下相关内容：\n\n" + "\n\n".join(context_parts)
+                            # 保留数据不完整提示（read_all_rows 触发条件）
+                            if "只显示了部分数据" in raw_result:
+                                filtered_text += (
+                                    "\n\n【重要】以上只显示了部分数据。"
+                                    "你必须立即调用 read_all_rows 工具获取完整数据，不要跳过此步骤。"
+                                    "在获取完整数据之前，不要生成最终回答。"
+                                )
+                            result["data"] = filtered_text
+                            result["filtered_by_summary"] = True
+                            logger.info("[MCP] 摘要过滤: %d -> %d 个文档", len(doc_ids), len(relevant_ids))
         except Exception as e:
             logger.error("[MCP] 摘要过滤失败，使用原始结果: %s", e, exc_info=True)
 

@@ -757,7 +757,10 @@
     function renderAgentTrace(plan, agentTrace) {
         if (!plan || plan.length === 0) return '';
 
-        // 合并 plan + agentTrace，按 plan 顺序
+        // 合并 plan + agentTrace；按 depends_on 拓扑分层排序，保证显示顺序 = 依赖/执行顺序
+        // （plan 数组顺序 = planner 建节点顺序 + orchestrator 后处理追加顺序，可能 ≠ 执行顺序）
+        const levelOf = new Map();
+        topologicalLevels(plan).forEach((lvl, li) => lvl.forEach(t => levelOf.set(t.id, li)));
         const steps = plan.map(task => {
             const trace = (agentTrace || []).find(t => t.name === task.agent);
             return {
@@ -771,7 +774,7 @@
                 artifacts: task.artifacts || [],
                 dependsOn: task.depends_on || [],
             };
-        });
+        }).sort((a, b) => (levelOf.get(a.id) ?? 0) - (levelOf.get(b.id) ?? 0));
 
         // 在最前面插入 Planner 步骤（来自 agent_trace，不在 plan tasks 中）
         const plannerTrace = (agentTrace || []).find(t => t.name === 'Planner');
