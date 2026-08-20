@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     java_base_url: str = "http://localhost:8085"
     # /qa/callback 共享密钥（与 Java 侧 ai-service.callback-token 保持一致）
     callback_token: str = ""
+    # 文档摘要内部接口令牌；未设置时沿用 callback_token 以保持现有部署兼容。
+    internal_service_token: str = ""
+
+    @property
+    def resolved_internal_service_token(self) -> str:
+        return self.internal_service_token or self.callback_token
 
     # Redis
     redis_host: str = "localhost"

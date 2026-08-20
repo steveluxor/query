@@ -70,6 +70,15 @@ public class Constants {
     public static final Long FILE_LOCK_TTL = 120L; // 秒（与向量化超时一致）
     public static final String FILE_NAME_EXISTS = "文件名已存在，请修改文件名";
 
+    // Redis 文档摘要缓存（逻辑过期 2-3 天，物理 TTL 7 天）
+    public static final String DOCUMENT_SUMMARY_CACHE_PREFIX = "doc:summary:";
+    public static final String DOCUMENT_SUMMARY_REFRESH_LOCK_PREFIX = "lock:doc:summary:";
+    public static final String DOCUMENT_SUMMARY_VERSION_PREFIX = "doc:summary:version:";
+    public static final long DOCUMENT_SUMMARY_EXPIRE_MIN_SECONDS = 2 * 24 * 3600L;
+    public static final long DOCUMENT_SUMMARY_EXPIRE_MAX_SECONDS = 3 * 24 * 3600L;
+    public static final long DOCUMENT_SUMMARY_REDIS_TTL_SECONDS = 7 * 24 * 3600L;
+    public static final long DOCUMENT_SUMMARY_REFRESH_LOCK_TTL_SECONDS = 15L;
+
     // RabbitMQ（异步向量化）
     public static final String RABBITMQ_INGEST_EXCHANGE = "ingest.exchange";
     public static final String RABBITMQ_INGEST_QUEUE = "ingest.queue";

@@ -61,3 +61,4 @@ server:
 ai-service:
   python-base-url: http://localhost:8000
   callback-token: ${AI_SERVICE_CALLBACK_TOKEN:}
+  internal-token: ${AI_SERVICE_INTERNAL_TOKEN:${AI_SERVICE_CALLBACK_TOKEN:}}

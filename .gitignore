@@ -32,3 +32,7 @@ frontend/nginx.exe
 cookies.txt
 desktop.ini
 待修改.txt
+
+# docs: 保留 archive，其余不上传
+docs/*
+!docs/archive/

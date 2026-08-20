@@ -6,7 +6,6 @@
 
 ---
 
-## Demo
 
 ### 流程 1：数值分析 + 图表生成
 
@@ -349,9 +348,13 @@ POST /qa/callback          ← Python → Java 持久化（X-Callback-Token 鉴�
 
 进程隔离 + 资源限制（512MB + 60s）+ 模块白名单，降低 LLM 生成代码执行风险。图片 base64 编码传回。
 
-### 7. MCP 工具协议
+### 7. MCP 工具协议 + 原生 Tool-Calling 循环
 
 标准化 Tool Interface 解耦 Runtime 与工具实现。支持工具独立部署、多语言实现。
+
+**MCPClient 自动注入机制**：`call_tool()` 通过 contextvars 自动注入 `session_id`/`task_id`/`ctx_source_id`，Agent 无需手动传递。内部工具（`_create_session`/`_cleanup_session`）和 ingestion 工具（`add_documents`/`delete_document`）按需跳过注入。
+
+**原生 Tool-Calling 循环**（`tool_loop.py`）：替代 LangChain `create_agent` 黑盒。Analysis Agent 通过 `bind_tools` + `ainvoke` 驱动 LLM 自主选择 MCP 工具（`calculate_sum`/`calculate_rank`/`read_all_rows`），每轮解析 `tool_calls` → 调用 MCP → 返回 `ToolMessage` → 循环直到无工具调用。内部参数（`session_id`/`task_id`/`ctx_source_id`）从 LLM-facing schema 中剔除，Agent 通过 `include` 列表隔离可用工具。
 
 ### 8. LLM 推理管线优化
 
@@ -395,7 +398,7 @@ DeepSeek 高延迟下 30s 默认超时会让 SDK 自动重试 ×2，一次慢调
 | Java 代码 | ~2000 行 |
 | 前端代码 | ~2000 行 |
 | 领域 Agent | 7 个 |
-| MCP 工具 | 6 个 |
+| MCP 工具 | 10 个（8 个面向用户 + 2 个内部工具） |
 | DAG 校验层 | 6 层 |
 | Docker 服务 | 9 个 |
 | 数据库 | MySQL + Redis + ChromaDB |

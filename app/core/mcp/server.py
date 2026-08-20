@@ -7,7 +7,6 @@ from mcp.server.fastmcp import FastMCP
 from app.config import settings
 from app.core.infra.vector_store import VectorStore
 from app.core.infra.summary_cache import DocumentSummaryCache
-from app.core.infra.redis_store import RedisStore
 from app.core.rag_engine import RAGEngine, SearchContext
 from app.core.mcp.session_manager import SessionManager
 from app.core.prompts.prompt_manager import PromptManager
@@ -218,8 +217,6 @@ async def delete_document(session_id: str, document_id: int) -> str:
     """从知识库中删除指定文档的所有切片。"""
     logger.info("[MCP] delete_document (session=%s): document_id=%d", session_id[:8], document_id)
     rag_engine.vector_store.delete_by_document_id(document_id)
-    if summary_cache:
-        await summary_cache.delete(document_id)
     return f"已删除文档 {document_id}"
 
 
@@ -261,8 +258,10 @@ async def main():
     rag_engine = RAGEngine(vs)
 
     # 初始化摘要缓存
-    redis_store = RedisStore()
-    summary_cache = DocumentSummaryCache(redis_store.client, settings.java_base_url)
+    summary_cache = DocumentSummaryCache(
+        settings.java_base_url,
+        settings.resolved_internal_service_token,
+    )
 
     # 初始化 LLM（用于相关性判断）
     from app.core.infra.llm_factory import create_llm

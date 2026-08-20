@@ -35,8 +35,8 @@ async def lifespan(application: FastAPI):
 
     # 初始化摘要缓存
     application.state.summary_cache = DocumentSummaryCache(
-        application.state.redis_store.client,
-        settings.java_base_url
+        settings.java_base_url,
+        settings.resolved_internal_service_token,
     )
 
     # 初始化 MCP Client

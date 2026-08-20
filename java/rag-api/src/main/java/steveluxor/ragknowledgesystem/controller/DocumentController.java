@@ -4,6 +4,8 @@ import io.minio.errors.*;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import steveluxor.ragknowledgesystem.common.JwtUtils;
@@ -11,11 +13,14 @@ import steveluxor.ragknowledgesystem.common.Result;
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.mapper.DocumentMapper;
 import steveluxor.ragknowledgesystem.service.DocumentService;
+import steveluxor.ragknowledgesystem.service.DocumentSummaryCacheService;
 import steveluxor.ragknowledgesystem.service.FileService;
 
 import java.io.InputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/document")
@@ -25,16 +30,19 @@ public class DocumentController {
     private final FileService fileService;
     private final DocumentMapper documentMapper;
     private final JwtUtils jwtUtils;
+    private final DocumentSummaryCacheService summaryCacheService;
 
     @Autowired
     public DocumentController(DocumentService documentService,
                                FileService fileService,
                                DocumentMapper documentMapper,
-                               JwtUtils jwtUtils) {
+                               JwtUtils jwtUtils,
+                               DocumentSummaryCacheService summaryCacheService) {
         this.documentService = documentService;
         this.fileService = fileService;
         this.documentMapper = documentMapper;
         this.jwtUtils = jwtUtils;
+        this.summaryCacheService = summaryCacheService;
     }
 
     @PostMapping("/upload")
@@ -109,19 +117,22 @@ public class DocumentController {
         return Result.ok();
     }
 
-    @GetMapping("/{id}/summary")
-    public Result getSummary(@PathVariable("id") Long documentId) {
-        Document doc = documentMapper.selectById(documentId);
-        return Result.ok(doc != null ? doc.getSummary() : null);
+    @PostMapping("/internal/summaries/query")
+    public ResponseEntity<Result<Map<Long, String>>> querySummaries(
+            @RequestBody Map<String, List<Long>> body) {
+        List<Long> documentIds = body.getOrDefault("documentIds", List.of());
+        return ResponseEntity.ok(Result.ok(summaryCacheService.getSummaries(documentIds)));
     }
 
-    @PutMapping("/{id}/summary")
-    public Result updateSummary(@PathVariable("id") Long documentId,
-                                @RequestBody java.util.Map<String, String> body) {
-        Document doc = new Document();
-        doc.setId(documentId);
-        doc.setSummary(body.get("summary"));
-        documentMapper.updateDocument(doc);
-        return Result.ok();
+    @PutMapping("/internal/summaries/{id}")
+    public ResponseEntity<Result<Void>> updateSummary(
+            @PathVariable("id") Long documentId,
+            @RequestBody Map<String, String> body) {
+        String summary = body.get("summary");
+        if (summary == null || summary.isBlank()) {
+            return ResponseEntity.badRequest().body(Result.fail(HttpStatus.BAD_REQUEST.value(), "summary 不能为空"));
+        }
+        summaryCacheService.saveSummary(documentId, summary);
+        return ResponseEntity.ok(Result.ok());
     }
 }

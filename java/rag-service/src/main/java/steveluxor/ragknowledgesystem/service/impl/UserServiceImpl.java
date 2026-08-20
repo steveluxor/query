@@ -18,6 +18,7 @@ import steveluxor.ragknowledgesystem.mapper.QaHistoryMapper;
 import steveluxor.ragknowledgesystem.mapper.QaSessionMapper;
 import steveluxor.ragknowledgesystem.mapper.UserMapper;
 import steveluxor.ragknowledgesystem.service.FileService;
+import steveluxor.ragknowledgesystem.service.DocumentSummaryCacheService;
 import steveluxor.ragknowledgesystem.service.UserService;
 
 import java.util.HashMap;
@@ -44,13 +45,15 @@ public class UserServiceImpl implements UserService {
     private final QaHistoryMapper qaHistoryMapper;
     private final QaSessionMapper qaSessionMapper;
     private final FileService fileService;
+    private final DocumentSummaryCacheService summaryCacheService;
     private final HttpClient httpClient;
     private final String pythonBaseUrl;
 
     @Autowired
     public UserServiceImpl(StringRedisTemplate stringRedisTemplate, UserMapper userMapper, JwtUtils jwtUtils,
-                           DocumentMapper documentMapper, QaHistoryMapper qaHistoryMapper,
-                           QaSessionMapper qaSessionMapper, FileService fileService,
+                            DocumentMapper documentMapper, QaHistoryMapper qaHistoryMapper,
+                            QaSessionMapper qaSessionMapper, FileService fileService,
+                            DocumentSummaryCacheService summaryCacheService,
                            @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
         this.stringRedisTemplate = stringRedisTemplate;
         this.userMapper = userMapper;
@@ -59,6 +62,7 @@ public class UserServiceImpl implements UserService {
         this.qaHistoryMapper = qaHistoryMapper;
         this.qaSessionMapper = qaSessionMapper;
         this.fileService = fileService;
+        this.summaryCacheService = summaryCacheService;
         this.pythonBaseUrl = pythonBaseUrl;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -200,6 +204,7 @@ public class UserServiceImpl implements UserService {
             } catch (Exception e) {
                 log.warn("文件删除失败（不影响后续删除）: documentId={}", doc.getId(), e);
             }
+            summaryCacheService.invalidate(doc.getId());
         }
         // 批量删除文档数据库记录
         documentMapper.deleteByUserId(userId);

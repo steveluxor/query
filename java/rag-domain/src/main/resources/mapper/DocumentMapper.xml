@@ -38,6 +38,14 @@
         select * from document where id = #{id}
     </select>
 
+    <select id="selectSummariesByIds" resultType="steveluxor.ragknowledgesystem.entity.Document">
+        select id, summary from document
+        where id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
     <delete id="deleteById">
         delete from document where id = #{id}
     </delete>

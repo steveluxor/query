@@ -14,6 +14,9 @@ public interface DocumentMapper {
     // 根据ID查询文档
     Document selectById(Long id);
 
+    // 根据ID批量查询文档摘要
+    List<Document> selectSummariesByIds(@Param("ids") List<Long> ids);
+
     // 删除文档
     void deleteById(Long id);
 

@@ -13,6 +13,7 @@ import steveluxor.ragknowledgesystem.exception.BizException;
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.mapper.DocumentMapper;
 import steveluxor.ragknowledgesystem.service.DocumentService;
+import steveluxor.ragknowledgesystem.service.DocumentSummaryCacheService;
 import steveluxor.ragknowledgesystem.service.FileService;
 
 import java.net.URI;
@@ -36,6 +37,7 @@ public class DocumentServiceImpl implements DocumentService {
     private final String pythonBaseUrl;
     private final FileService fileService;
     private final DocumentMapper documentMapper;
+    private final DocumentSummaryCacheService summaryCacheService;
     private final StringRedisTemplate redisTemplate;
     private final RabbitTemplate rabbitTemplate;
     private final HttpClient httpClient;
@@ -44,11 +46,13 @@ public class DocumentServiceImpl implements DocumentService {
     public DocumentServiceImpl(
             FileService fileService,
             DocumentMapper documentMapper,
+            DocumentSummaryCacheService summaryCacheService,
             StringRedisTemplate redisTemplate,
             RabbitTemplate rabbitTemplate,
             @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
         this.fileService = fileService;
         this.documentMapper = documentMapper;
+        this.summaryCacheService = summaryCacheService;
         this.redisTemplate = redisTemplate;
         this.rabbitTemplate = rabbitTemplate;
         this.pythonBaseUrl = pythonBaseUrl;
@@ -178,6 +182,7 @@ public class DocumentServiceImpl implements DocumentService {
         deleteVector(documentId);
         deleteMinioFile(document.getFilePath());
         documentMapper.deleteById(documentId);
+        summaryCacheService.invalidate(documentId);
 
         log.info("文档删除成功: documentId={}", documentId);
         return Result.ok();
@@ -195,6 +200,7 @@ public class DocumentServiceImpl implements DocumentService {
 
         try {
             deleteVector(documentId);
+            summaryCacheService.invalidate(documentId);
             documentMapper.updateStatus(documentId, Constants.DOC_STATUS_PROCESSING);
 
             sendIngestMessage(documentId, document.getFilePath(), document.getFileName());
@@ -235,6 +241,7 @@ public class DocumentServiceImpl implements DocumentService {
 
         try {
             deleteVector(oldDocId);
+            summaryCacheService.invalidate(oldDocId);
             deleteMinioFile(oldDoc.getFilePath());
 
             String objectName = uploadToMinio(file);

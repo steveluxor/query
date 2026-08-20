@@ -125,6 +125,7 @@ services:
       REDIS_HOST: redis
       REDIS_PASSWORD: sty01725
       CALLBACK_TOKEN: ${CALLBACK_TOKEN:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
       TZ: Asia/Shanghai
     volumes:
       - chroma-data:/app/chroma_db
@@ -176,10 +177,11 @@ services:
       dockerfile: Dockerfile
     container_name: rag-java-backend
     ports:
-      - "8085:8085"
+      - "127.0.0.1:8085:8085"
     environment:
       SPRING_PROFILES_ACTIVE: docker
       AI_SERVICE_CALLBACK_TOKEN: ${CALLBACK_TOKEN:-}
+      AI_SERVICE_INTERNAL_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
       TZ: Asia/Shanghai
     depends_on:
       mysql:
