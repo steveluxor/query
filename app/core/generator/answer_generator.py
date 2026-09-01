@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 from app.config import settings
@@ -90,8 +91,14 @@ class AnswerGenerator(BaseAgent):
         """构建 Generator prompt — 精简版，减少 token 消耗"""
         parts = [PromptManager.get("generator", "system"), ""]
 
-        # 用户问题
-        parts.append(f"用户问题：{context.question}")
+        # 使用 Planner 解析后的完整语义；原始短追问仍保存在 context.question。
+        user_question = context.resolved_question or context.question
+        parts.append(f"用户问题：{user_question}")
+
+        if context.preferences:
+            parts.append("\n用户偏好：" + json.dumps(context.preferences, ensure_ascii=False))
+        parts.append("\n回答约束：涉及文档事实、数值或结论时，"
+                     "以本轮证据、计算结果和代码执行结果为准。")
 
         # 知识对象（紧凑格式，token budget 截断 list 值）
         if structured_knowledge:

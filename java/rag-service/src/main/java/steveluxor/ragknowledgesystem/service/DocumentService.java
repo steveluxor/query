@@ -24,4 +24,7 @@ public interface DocumentService {
 
     // 更新文档状态（供 Python 消费者调用）
     void updateDocumentStatus(Long documentId, String status);
+    void activateDocumentIndex(Long documentId, Integer indexVersion, String eventId);
+    void markIndexEventProcessing(String eventId);
+    void retryIndexEvent(String eventId, String error);
 }

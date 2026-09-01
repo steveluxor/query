@@ -19,19 +19,28 @@ class SearchContext:
     search_count: int = 0
     agg_count: int = 0
     document_ids: list[int] | None = None
+    document_versions: dict[int, int] | None = None
     tools_called: list[str] = field(default_factory=list)
 
 
 class RAGEngine:
     """RAG 引擎：通过 Tool Calling 驱动问答流程"""
 
-    def __init__(self, vector_store: VectorStore):
+    def __init__(self, vector_store: VectorStore, sparse_store=None):
         self.vector_store = vector_store
+        self.sparse_store = sparse_store
         from app.core.infra.llm_factory import create_llm
         self.llm = create_llm()
 
     # ChromaDB 余弦距离阈值：高于此值视为不相关，排除
     SCORE_THRESHOLD = 0.92
+
+    @staticmethod
+    def _only_active_versions(items, versions: dict[int, int] | None):
+        if not versions:
+            return items
+        return [item for item in items if versions.get(int(item[0].metadata.get("document_id", -1)))
+                == int(item[0].metadata.get("index_version", 1))]
 
     MIN_GAP_THRESHOLD = 0.05
 
@@ -186,6 +195,20 @@ class RAGEngine:
 
         logger.info("文件名回退: 匹配文档 %s, 获取 %d 个 chunk", matched_ids, len(selected))
         return selected
+
+    @staticmethod
+    def _rrf_fuse(dense_results: list, sparse_results: list, k: int = 60) -> list:
+        """Fuse dense and BM25 rankings. Returned scores remain lower-is-better."""
+        fused = {}
+        for ranking in (dense_results, sparse_results):
+            for rank, (doc, _) in enumerate(ranking, start=1):
+                chunk_id = doc.metadata.get("chunk_id")
+                if not chunk_id:
+                    continue
+                entry = fused.setdefault(chunk_id, {"doc": doc, "score": 0.0})
+                entry["score"] += 1.0 / (k + rank)
+        return [(entry["doc"], -entry["score"])
+                for entry in sorted(fused.values(), key=lambda item: item["score"], reverse=True)]
 
     # ==================== 聚合/排名辅助 ====================
 
@@ -354,11 +377,11 @@ class RAGEngine:
             start = row_start or 1
             end = row_end or 999999
             all_chunks = self.vector_store.get_all_chunks(filter=doc_filter)
-            selected = [
+            selected = self._only_active_versions([
                 (doc, 0.0) for doc, _ in all_chunks
                 if doc.metadata.get("row_number") is not None
                 and start <= doc.metadata["row_number"] <= end
-            ]
+            ], ctx.document_versions)
             if selected:
                 selected.sort(key=lambda x: x[0].metadata.get("row_number", 0))
                 filtered = []
@@ -383,29 +406,22 @@ class RAGEngine:
 
             # 1. Embedding 相似度搜索
             results = self.vector_store.similarity_search(query, k=60, filter=doc_filter)
-            filtered = [(doc, score) for doc, score in results if score <= self.SCORE_THRESHOLD]
+            filtered = self._only_active_versions(
+                [(doc, score) for doc, score in results if score <= self.SCORE_THRESHOLD], ctx.document_versions)
             logger.info("搜索诊断: embedding返回=%d, 阈值过滤后=%d, 文档数=%d",
                         len(results), len(filtered),
                         len({doc.metadata.get("document_id") for doc, _ in filtered}))
 
-            # 2. 关键词搜索（补充 embedding 可能遗漏的文档）
-            keyword_results = []
-            if keywords:
-                keyword_results = self.vector_store.keyword_search(keywords, filter=doc_filter)
-                logger.info("搜索诊断: 关键词匹配=%d, 文档数=%d",
-                            len(keyword_results),
-                            len({doc.metadata.get("document_id") for doc, _ in keyword_results}))
-
-            # 3. 合并结果：关键词匹配的文档优先补入
-            if keyword_results:
-                selected_doc_ids = {doc.metadata.get("document_id") for doc, _ in filtered} if filtered else set()
-                for doc, kw_score in keyword_results:
-                    did = doc.metadata.get("document_id")
-                    # 如果是新文档，补入（用较低的 score 确保排在前面）
-                    if did not in selected_doc_ids:
-                        filtered.append((doc, 1.0))  # 排在 embedding 结果之后，strict 策略不会误选
-                        selected_doc_ids.add(did)
-                        logger.info("关键词搜索补入: %s (doc_id=%s)", doc.metadata.get("file_name", ""), did)
+            # 2. BM25 稀疏召回 + RRF 融合。不可用时保留 Dense-only 降级。
+            if self.sparse_store and keywords:
+                try:
+                    sparse_results = self.sparse_store.search(keywords, ctx.document_ids, limit=60)
+                    sparse_results = self._only_active_versions(sparse_results, ctx.document_versions)
+                    if sparse_results:
+                        filtered = self._rrf_fuse(filtered, sparse_results)
+                    logger.info("搜索诊断: BM25=%d, RRF 后=%d", len(sparse_results), len(filtered))
+                except Exception as error:
+                    logger.warning("BM25 搜索失败，降级为向量检索: %s", error)
 
             if not filtered:
                 fallback_chunks = self._filename_fallback(query, ctx.document_ids)
@@ -435,6 +451,7 @@ class RAGEngine:
                             selected_ids.add(did)
                             logger.info("文件名补充(embedding漏掉): %s", doc.metadata.get("file_name", ""))
 
+        selected = self._only_active_versions(selected, ctx.document_versions)
         selected.sort(key=lambda x: x[1])
 
         # strict 策略：折叠到得分最高的单一文档（聚合查询用）
@@ -625,7 +642,8 @@ class RAGEngine:
 
         full_filter = {"document_id": {"$in": relevant_ids}}
         AGG_EXCLUDE = ["总计", "合计", "小计"]
-        all_chunks = self.vector_store.get_all_chunks(filter=full_filter)
+        all_chunks = self._only_active_versions(
+            self.vector_store.get_all_chunks(filter=full_filter), ctx.document_versions)
         filtered = [
             (doc, 0.0) for doc, _ in all_chunks
             if doc.metadata.get("sheet_name") != "汇总"
@@ -655,5 +673,3 @@ class RAGEngine:
             rows.append(f"[{label}]\n{doc.page_content}")
 
         return "以下是完整数据：\n\n" + "\n\n".join(rows) + "\n\n以上为该文档全部数据。"
-
-

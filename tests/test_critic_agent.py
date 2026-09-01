@@ -74,6 +74,17 @@ def test_parse_actions_no_retry(agent, context):
     assert actions == []
 
 
+def test_slim_prompt_uses_resolved_question(agent):
+    context = AgentContext(
+        question="哪个最高？",
+        resolved_question="统计上一轮各品牌花费并确认花费最高的品牌。",
+    )
+
+    prompt = agent._build_slim_prompt(context, evidence_list=[], generated_answer="万代最高")
+
+    assert "用户问题：统计上一轮各品牌花费并确认花费最高的品牌。" in prompt
+
+
 def test_parse_actions_with_retry(agent, context):
     """need_retry=true 时返回 ControlAction"""
     context.set_output("need_retry", True, producer="critic")

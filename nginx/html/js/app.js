@@ -665,6 +665,13 @@
         state.currentSessionId = sessionId;
         renderSessionList();
         updateQaHeader();
+        _historyLoadVersion++;
+        _historyMessages = [];
+        els.agentTrace.innerHTML = '<div class="trace-empty"><div class="trace-empty-icon">💬</div><div class="trace-empty-text">正在加载对话...</div></div>';
+        els.resultWorkspace.style.display = 'none';
+        els.dagContent.innerHTML = '<div class="dag-empty">执行任务后显示</div>';
+        _liveTraceEl = null;
+        _liveAnswerEl = null;
         loadQaHistory();
     }
 
@@ -1167,6 +1174,7 @@
 
     // --- 历史对话渲染：显示全部消息 + 可切换 Agent Trace/DAG ---
     let _historyMessages = []; // 保存当前会话的所有消息，供 switchToRound 使用
+    let _historyLoadVersion = 0; // 防止旧请求在切换后覆盖当前会话视图
 
     function _parseJSON(val) {
         if (!val) return null;
@@ -1176,6 +1184,10 @@
     function renderHistoricalMessages(messages) {
         const container = els.agentTrace;
         const workspace = els.resultWorkspace;
+
+        // innerHTML 会移除旧会话的实时 DOM。保留实时状态，供切回该会话时重建。
+        _liveTraceEl = null;
+        _liveAnswerEl = null;
 
         if (!messages || messages.length === 0) {
             const ownsRun = _liveRunSessionId === state.currentSessionId && _currentRuntimeSource;
@@ -1298,20 +1310,60 @@
     // ============================================
 
     async function loadQaHistory() {
-        if (!state.currentSessionId) {
+        const sessionId = state.currentSessionId;
+        const loadVersion = ++_historyLoadVersion;
+        if (!sessionId) {
             renderHistoricalMessages([]);
             state.sessionHasMessages = false;
             els.newSessionBtn.disabled = true;
             return;
         }
         try {
-            const list = await Api.getQaHistory(state.currentSessionId);
+            const list = await Api.getQaHistory(sessionId);
+            if (state.currentSessionId !== sessionId || loadVersion !== _historyLoadVersion) return;
             const msgs = list || [];
             state.sessionHasMessages = msgs.length > 0;
             els.newSessionBtn.disabled = !state.sessionHasMessages;
             renderHistoricalMessages(msgs);
+            await _restoreActiveRun(sessionId);
         } catch (err) {
             console.error('获取问答历史失败:', err);
+        }
+    }
+
+    async function _restoreActiveRun(sessionId) {
+        if (state.currentSessionId !== sessionId || _currentRuntimeSource || qaLoading) return;
+        try {
+            const activeRun = await Api.getActiveRuntime(sessionId);
+            if (!activeRun || !activeRun.run_id || state.currentSessionId !== sessionId) return;
+
+            const question = activeRun.question || '正在恢复此前的问题';
+            const userBubble = `<div class="chat-msg user-msg">
+                <div class="chat-bubble user-bubble">
+                    <div class="chat-text">${escapeHtml(question)}</div>
+                    <div class="chat-time">进行中</div>
+                </div>
+            </div>`;
+            const loadingBubble = `<div class="chat-msg ai-msg" id="loadingBubble">
+                <div class="chat-bubble ai-bubble loading-bubble">
+                    <div class="chat-dots"><span></span><span></span><span></span></div>
+                </div>
+            </div>`;
+            state._pendingUserBubble = userBubble;
+            state._pendingLoadingBubble = loadingBubble;
+            state._pendingSessionId = sessionId;
+            const existingChat = els.agentTrace.querySelector('.chat-history');
+            if (existingChat) {
+                existingChat.insertAdjacentHTML('beforeend', userBubble + loadingBubble);
+            } else {
+                els.agentTrace.innerHTML = `<div class="chat-history">${userBubble}${loadingBubble}</div>`;
+            }
+            els.resultWorkspace.style.display = 'none';
+            els.dagContent.innerHTML = '<div class="dag-empty">恢复执行中...</div>';
+            _setQaRunning(true);
+            _connectSSE(activeRun.run_id, () => _finishQuestion(false));
+        } catch (err) {
+            console.warn('恢复进行中的回答失败:', err);
         }
     }
 
@@ -1503,10 +1555,14 @@
                         });
                     }
                     currentPlan.forEach(t => {
+                        const rawStatus = t.status || 'pending';
+                        const status = rawStatus === 'retrying' ? 'running' : rawStatus;
                         _liveTraceSteps.push({
                             id: t.id, agent: t.agent, objective: t.objective || '',
-                            status: 'pending', durationMs: 0, summary: '', toolsUsed: [],
+                            status, durationMs: t.duration_ms || 0,
+                            summary: t.summary || '', toolsUsed: t.tools_used || [],
                         });
+                        if (status !== 'pending') _updateDagNodeStatus(t.id, status);
                     });
                     _renderLiveTrace(); // 显示 Planner 步骤
                 }
@@ -1621,19 +1677,10 @@
 
         runtimeSource.onerror = () => {
             if (_sseCompleted) return;
-            runtimeSource.close();
-            _currentRuntimeSource = null;
-            _currentRunId = null;
-            _liveRunSessionId = null;
-            _livePlan = null;
-            // SSE 断开后延迟清理，兜底未收到 runtime_completed 的情况
-            setTimeout(() => {
-                if (!_sseCompleted) {
-                    _sseCompleted = true;
-                    _removeLiveAnswer();
-                    if (onComplete) onComplete();
-                }
-            }, 2000);
+            // 不主动关闭 EventSource。浏览器会以同一连接的 Last-Event-ID 自动重连，
+            // 服务端据此从 Redis Stream 回放 Worker 崩溃期间遗漏的运行事件。
+            // 保留 run_id 与当前 DAG，避免恢复执行被前端误判为已结束。
+            console.warn('[SSE] 运行事件流暂时断开，等待自动重连');
         };
     }
 

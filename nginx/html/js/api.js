@@ -142,6 +142,10 @@ const Api = (() => {
             });
         },
 
+        getActiveRuntime(sessionId) {
+            return request(`/qa/active-runtime?sessionId=${encodeURIComponent(sessionId)}`);
+        },
+
         getQaHistory(sessionId) {
             return request(`/qa/history?sessionId=${sessionId}`);
         },

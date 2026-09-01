@@ -114,19 +114,49 @@ public class QaServiceImpl implements QaService {
     // ==================== SSE 透传 ====================
 
     @Override
-    public SseEmitter streamRuntime(String runId) {
-        return proxySse(pythonBaseUrl + "/qa/runtime/" + runId, "runtime", runId);
+    public SseEmitter streamRuntime(String runId, String lastEventId) {
+        Long userId = CurrentUser.get();
+        return proxySse(pythonBaseUrl + "/qa/runtime/" + runId + "?user_id=" + userId,
+                "runtime", runId, lastEventId);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Result getActiveRuntime(Long sessionId) {
+        Long userId = CurrentUser.get();
+        QaSession session = qaSessionMapper.selectById(sessionId);
+        if (session == null || !Objects.equals(session.getUserId(), userId)) {
+            throw new BizException(QA_SESSION_NOT_EXIST);
+        }
+        try {
+            String url = pythonBaseUrl + "/qa/active-runtime?session_id=" + sessionId + "&user_id=" + userId;
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(10))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("[RUN] 查询活动运行失败: sessionId={}, status={}", sessionId, response.statusCode());
+                return Result.fail("查询进行中的回答失败");
+            }
+            return Result.ok(objectMapper.readValue(response.body(), Map.class));
+        } catch (Exception e) {
+            log.error("[RUN] 查询活动运行异常: sessionId={}", sessionId, e);
+            return Result.fail("查询进行中的回答失败");
+        }
     }
 
     @Override
     public Result stop(String runId) {
         try {
+            Long userId = CurrentUser.get();
             HttpRequest httpReq = HttpRequest.newBuilder()
                     .uri(URI.create(pythonBaseUrl + "/qa/stop"))
                     .header("Content-Type", "application/json; charset=utf-8")
                     .timeout(Duration.ofSeconds(10))
                     .POST(HttpRequest.BodyPublishers.ofString(
-                            "{\"run_id\": \"" + runId + "\"}", StandardCharsets.UTF_8))
+                            "{\"run_id\": \"" + runId + "\", \"user_id\": " + userId + "}", StandardCharsets.UTF_8))
                     .build();
             HttpResponse<String> httpResp = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofString());
             if (httpResp.statusCode() == 200) {
@@ -148,7 +178,7 @@ public class QaServiceImpl implements QaService {
      * - 校验 Python 状态码：非 200 时发一条 runtime_error 事件，不把错误体当 SSE 转发
      * - 心跳：15s 定时发 comment 注释，避免长 Planner 阶段 nginx/前端提前断开
      */
-    private SseEmitter proxySse(String pythonUrl, String streamType, String runId) {
+    private SseEmitter proxySse(String pythonUrl, String streamType, String runId, String lastEventId) {
         SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
 
         ScheduledFuture<?> heartbeat = heartbeatScheduler.scheduleAtFixedRate(() -> {
@@ -161,12 +191,14 @@ public class QaServiceImpl implements QaService {
 
         sseExecutor.execute(() -> {
             try {
-                HttpRequest httpReq = HttpRequest.newBuilder()
+                HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                         .uri(URI.create(pythonUrl))
                         .header("Accept", "text/event-stream")
-                        .timeout(Duration.ofSeconds(300))
-                        .GET()
-                        .build();
+                        .timeout(Duration.ofSeconds(300));
+                if (lastEventId != null && !lastEventId.isBlank()) {
+                    requestBuilder.header("Last-Event-ID", lastEventId);
+                }
+                HttpRequest httpReq = requestBuilder.GET().build();
 
                 HttpResponse<java.io.InputStream> response = httpClient.send(httpReq, HttpResponse.BodyHandlers.ofInputStream());
                 int statusCode = response.statusCode();
@@ -196,26 +228,34 @@ public class QaServiceImpl implements QaService {
 
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
                     String eventType = "message";
+                    String eventId = null;
                     String data = null;
                     int eventCount = 0;
                     String line;
                     while ((line = reader.readLine()) != null) {
                         if (line.startsWith("event: ")) {
                             eventType = line.substring(7).trim();
+                        } else if (line.startsWith("id: ")) {
+                            eventId = line.substring(4).trim();
                         } else if (line.startsWith("data: ")) {
                             data = line.substring(6);
                         } else if (line.isEmpty() && data != null) {
                             eventCount++;
                             log.info("[SSE-{}] 转发事件 #{}: type={}", streamType, eventCount, eventType);
                             try {
-                                emitter.send(SseEmitter.event()
+                                SseEmitter.SseEventBuilder event = SseEmitter.event()
                                         .name(eventType)
-                                        .data(data));
+                                        .data(data);
+                                if (eventId != null && !eventId.isBlank()) {
+                                    event.id(eventId);
+                                }
+                                emitter.send(event);
                             } catch (Exception e) {
                                 log.warn("[SSE-{}] 转发失败: {}", streamType, e.getMessage());
                                 break;
                             }
                             eventType = "message";
+                            eventId = null;
                             data = null;
                         }
                     }
@@ -410,11 +450,16 @@ public class QaServiceImpl implements QaService {
             List<Integer> accessibleDocIds = accessibleDocs.stream()
                     .map(doc -> doc.getId().intValue())
                     .collect(Collectors.toList());
+            Map<Integer, Integer> documentVersions = accessibleDocs.stream()
+                    .filter(doc -> doc.getActiveIndexVersion() != null)
+                    .collect(Collectors.toMap(doc -> doc.getId().intValue(), Document::getActiveIndexVersion));
 
             Map<String, Object> pythonReq = new HashMap<>();
             pythonReq.put("question", request.getQuestion());
+            pythonReq.put("user_id", userId);
             if (!accessibleDocIds.isEmpty()) {
                 pythonReq.put("document_ids", accessibleDocIds);
+                pythonReq.put("document_versions", documentVersions);
             }
             if (request.getStrategy() != null) {
                 pythonReq.put("strategy", request.getStrategy());

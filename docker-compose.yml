@@ -39,6 +39,22 @@ services:
     networks:
       - rag-network
 
+  redisearch:
+    image: redis/redis-stack-server:latest
+    container_name: rag-redisearch
+    environment:
+      REDIS_ARGS: "--appendonly yes --requirepass ${SEARCH_REDIS_PASSWORD:-search01725}"
+    volumes:
+      - redisearch-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${SEARCH_REDIS_PASSWORD:-search01725} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: rag-rabbitmq
@@ -124,6 +140,10 @@ services:
       VECTOR_STORE_PATH: /app/chroma_db
       REDIS_HOST: redis
       REDIS_PASSWORD: sty01725
+      SEARCH_REDIS_ENABLED: "true"
+      SEARCH_REDIS_HOST: redisearch
+      SEARCH_REDIS_PORT: 6379
+      SEARCH_REDIS_PASSWORD: ${SEARCH_REDIS_PASSWORD:-search01725}
       CALLBACK_TOKEN: ${CALLBACK_TOKEN:-}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
       TZ: Asia/Shanghai
@@ -137,6 +157,8 @@ services:
       retries: 3
     depends_on:
       ollama:
+        condition: service_healthy
+      redisearch:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -156,8 +178,13 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       JAVA_BASE_URL: http://java-backend:8085
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
       PYTHON_BASE_URL: http://python-ai:8000
       VECTOR_STORE_PATH: /app/chroma_db
+      SEARCH_REDIS_ENABLED: "true"
+      SEARCH_REDIS_HOST: redisearch
+      SEARCH_REDIS_PORT: 6379
+      SEARCH_REDIS_PASSWORD: ${SEARCH_REDIS_PASSWORD:-search01725}
     volumes:
       - chroma-data:/app/chroma_db
       - temp-files:/tmp/rag_temp
@@ -216,6 +243,7 @@ volumes:
   minio-data:
   ollama-data:
   chroma-data:
+  redisearch-data:
   temp-files:
 
 networks:

@@ -30,7 +30,7 @@ def _tool(name, required=(), optional=()):
 def test_build_tool_schemas_strips_internal_params():
     tool = _tool("calculate_sum",
                  required=("session_id", "key_name"),
-                 optional=("task_id", "content_filter", "ctx_source_id"))
+                 optional=("task_id", "content_filter", "ctx_source_id", "original_question"))
     schemas = build_tool_schemas([tool])
 
     assert len(schemas) == 1
@@ -42,6 +42,7 @@ def test_build_tool_schemas_strips_internal_params():
     assert "session_id" not in params["properties"]
     assert "task_id" not in params["properties"]
     assert "ctx_source_id" not in params["properties"]
+    assert "original_question" not in params["properties"]
     assert "key_name" in params["properties"]
     assert params["required"] == ["key_name"]
 

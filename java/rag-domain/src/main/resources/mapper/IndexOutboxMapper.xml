@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="steveluxor.ragknowledgesystem.mapper.IndexOutboxMapper">
+    <insert id="insert" parameterType="steveluxor.ragknowledgesystem.entity.IndexOutboxEvent" useGeneratedKeys="true" keyProperty="id">
+        insert into index_outbox(event_id, document_id, index_version, event_type, payload, status, retry_count)
+        values(#{eventId}, #{documentId}, #{indexVersion}, #{eventType}, #{payload}, #{status}, #{retryCount})
+    </insert>
+    <select id="selectDispatchable" resultType="steveluxor.ragknowledgesystem.entity.IndexOutboxEvent">
+        select * from index_outbox
+        where status in ('PENDING', 'RETRYING')
+          and (next_retry_time is null or next_retry_time &lt;= NOW())
+        order by id limit #{limit}
+    </select>
+    <update id="markPublished">update index_outbox set status = 'PUBLISHED', published_time = NOW(), next_retry_time = null, last_error = null where id = #{id} and status in ('PENDING', 'RETRYING')</update>
+    <update id="markProcessing">update index_outbox set status = 'PROCESSING', update_time = NOW() where event_id = #{eventId} and status = 'PUBLISHED'</update>
+    <update id="markIndexed">update index_outbox set status = 'INDEXED', next_retry_time = null, last_error = null, update_time = NOW() where event_id = #{eventId} and status != 'INDEXED'</update>
+    <update id="markRetry">
+        update index_outbox
+        set retry_count = retry_count + 1,
+            status = case when retry_count + 1 &gt;= 5 then 'FAILED' else 'RETRYING' end,
+            next_retry_time = case when retry_count + 1 &gt;= 5 then null else DATE_ADD(NOW(), INTERVAL LEAST(POW(2, retry_count), 300) SECOND) end,
+            last_error = #{error}, update_time = NOW()
+        where event_id = #{eventId} and status != 'INDEXED'
+    </update>
+    <update id="recoverTimedOut">
+        update index_outbox
+        set retry_count = retry_count + 1,
+            status = case when retry_count + 1 &gt;= 5 then 'FAILED' else 'RETRYING' end,
+            next_retry_time = case when retry_count + 1 &gt;= 5 then null else NOW() end,
+            last_error = 'consumer callback timeout', update_time = NOW()
+        where status in ('PUBLISHED', 'PROCESSING')
+          and published_time &lt; DATE_SUB(NOW(), INTERVAL #{timeoutSeconds} SECOND)
+    </update>
+</mapper>

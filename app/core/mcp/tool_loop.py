@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 logger = logging.getLogger(__name__)
 
 # MCPClient.call_tool 自动注入、不暴露给 LLM 的内部参数
-_INTERNAL_PARAMS = ("session_id", "task_id", "ctx_source_id")
+_INTERNAL_PARAMS = ("session_id", "task_id", "ctx_source_id", "original_question")
 
 
 def build_tool_schemas(mcp_tools, include: list[str] | None = None) -> list[dict]:

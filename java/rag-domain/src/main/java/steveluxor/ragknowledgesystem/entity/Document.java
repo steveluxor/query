@@ -22,4 +22,6 @@ public class Document extends BaseEntity {
     private String status;
     private Integer permission;
     private String summary;
+    private Integer indexVersion;
+    private Integer activeIndexVersion;
 }

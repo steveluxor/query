@@ -73,6 +73,8 @@ async def ingest_document(
             document_id=request.document_id,
             file_name=request.file_name,
         )
+        for chunk in chunks:
+            chunk["metadata"]["index_version"] = request.index_version
     except ValueError as e:
         raise BizException(ErrorCode.PARAM_ERROR, str(e))
     except FileNotFoundError:
@@ -87,6 +89,7 @@ async def ingest_document(
 
     await mcp_client.call_tool("add_documents", {
         "document_id": request.document_id,
+        "index_version": request.index_version,
         "texts": texts,
         "metadatas": metadatas,
     }, session_id=INGESTION_SESSION)

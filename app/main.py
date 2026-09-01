@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -53,11 +55,25 @@ async def lifespan(application: FastAPI):
         redis_store=application.state.redis_store,
         mcp_client=mcp_client,
     )
+    recovery_task = asyncio.create_task(_recovery_loop(application))
     yield
+    recovery_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await recovery_task
     # 资源清理
     await mcp_client.disconnect()
     application.state.agent_memory = None
     await application.state.redis_store.close()
+
+
+async def _recovery_loop(application: FastAPI):
+    """Keep scanning because a restarted process may inherit an unexpired lease."""
+    while True:
+        try:
+            await qa.recover_interrupted_runs(application)
+        except Exception:
+            logging.getLogger(__name__).exception("运行恢复扫描失败")
+        await asyncio.sleep(5)
 
 
 app = FastAPI(

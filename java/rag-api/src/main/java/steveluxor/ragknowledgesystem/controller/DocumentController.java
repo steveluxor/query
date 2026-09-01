@@ -117,6 +117,30 @@ public class DocumentController {
         return Result.ok();
     }
 
+    @PutMapping("/{id}/index-ready")
+    public Result activateIndexVersion(@PathVariable("id") Long documentId,
+                                       @RequestBody Map<String, Object> body) {
+        Object rawVersion = body.get("indexVersion");
+        Integer indexVersion = rawVersion instanceof Number value ? value.intValue() : null;
+        if (indexVersion == null || indexVersion < 1) {
+            return Result.fail(HttpStatus.BAD_REQUEST.value(), "indexVersion 非法");
+        }
+        documentService.activateDocumentIndex(documentId, indexVersion, String.valueOf(body.getOrDefault("eventId", "")));
+        return Result.ok();
+    }
+
+    @PutMapping("/internal/index-events/{eventId}/processing")
+    public Result markIndexEventProcessing(@PathVariable String eventId) {
+        documentService.markIndexEventProcessing(eventId);
+        return Result.ok();
+    }
+
+    @PutMapping("/internal/index-events/{eventId}/retry")
+    public Result retryIndexEvent(@PathVariable String eventId, @RequestBody Map<String, String> body) {
+        documentService.retryIndexEvent(eventId, body.get("error"));
+        return Result.ok();
+    }
+
     @PostMapping("/internal/summaries/query")
     public ResponseEntity<Result<Map<Long, String>>> querySummaries(
             @RequestBody Map<String, List<Long>> body) {

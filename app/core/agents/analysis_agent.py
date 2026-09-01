@@ -41,9 +41,6 @@ class AnalysisAgent(BaseAgent):
     async def run(self, context: AgentContext, mcp_client: MCPClient = None, mcp_session_id: str = "", **kwargs) -> AgentContext:
         system_prompt = PromptManager.get("analysis", "system")
 
-        if context.memory_context:
-            system_prompt += f"\n\n<长期记忆>\n{context.memory_context}\n</长期记忆>"
-
         llm = self.llm or create_llm()
         user_prompt = _task_objective_var.get() or context.question
 

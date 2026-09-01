@@ -10,7 +10,9 @@ import java.util.Map;
 public interface QaService {
     Result ask(AskRequest request);
 
-    SseEmitter streamRuntime(String runId);
+    SseEmitter streamRuntime(String runId, String lastEventId);
+
+    Result getActiveRuntime(Long sessionId);
 
     Result stop(String runId);
 

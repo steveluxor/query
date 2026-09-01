@@ -6,12 +6,15 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import steveluxor.ragknowledgesystem.common.Constants;
 import steveluxor.ragknowledgesystem.common.Result;
 import steveluxor.ragknowledgesystem.exception.BizException;
 import steveluxor.ragknowledgesystem.entity.Document;
 import steveluxor.ragknowledgesystem.mapper.DocumentMapper;
+import steveluxor.ragknowledgesystem.mapper.IndexOutboxMapper;
+import steveluxor.ragknowledgesystem.entity.IndexOutboxEvent;
 import steveluxor.ragknowledgesystem.service.DocumentService;
 import steveluxor.ragknowledgesystem.service.DocumentSummaryCacheService;
 import steveluxor.ragknowledgesystem.service.FileService;
@@ -40,6 +43,8 @@ public class DocumentServiceImpl implements DocumentService {
     private final DocumentSummaryCacheService summaryCacheService;
     private final StringRedisTemplate redisTemplate;
     private final RabbitTemplate rabbitTemplate;
+    private final IndexOutboxMapper outboxMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient;
 
     @Autowired
@@ -48,13 +53,14 @@ public class DocumentServiceImpl implements DocumentService {
             DocumentMapper documentMapper,
             DocumentSummaryCacheService summaryCacheService,
             StringRedisTemplate redisTemplate,
-            RabbitTemplate rabbitTemplate,
+            RabbitTemplate rabbitTemplate, IndexOutboxMapper outboxMapper,
             @org.springframework.beans.factory.annotation.Value("${ai-service.python-base-url:http://localhost:8000}") String pythonBaseUrl) {
         this.fileService = fileService;
         this.documentMapper = documentMapper;
         this.summaryCacheService = summaryCacheService;
         this.redisTemplate = redisTemplate;
         this.rabbitTemplate = rabbitTemplate;
+        this.outboxMapper = outboxMapper;
         this.pythonBaseUrl = pythonBaseUrl;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -99,19 +105,35 @@ public class DocumentServiceImpl implements DocumentService {
                 file.getContentType());
     }
 
-    private void sendIngestMessage(Long documentId, String filePath, String fileName) {
-        Map<String, String> message = new HashMap<>();
+    private void createIndexEvent(Long documentId, int indexVersion, String eventType, String filePath, String fileName) {
+        Map<String, Object> message = new HashMap<>();
+        message.put("eventId", UUID.randomUUID().toString());
         message.put("documentId", String.valueOf(documentId));
-        message.put("filePath", filePath);
-        message.put("fileName", fileName);
-        rabbitTemplate.convertAndSend(RABBITMQ_INGEST_EXCHANGE, RABBITMQ_INGEST_ROUTING_KEY, message);
-        log.info("向量化任务已写入队列: documentId={}", documentId);
+        message.put("indexVersion", indexVersion);
+        message.put("eventType", eventType);
+        if (filePath != null) message.put("filePath", filePath);
+        if (fileName != null) message.put("fileName", fileName);
+        try {
+            IndexOutboxEvent event = new IndexOutboxEvent();
+            event.setEventId((String) message.get("eventId"));
+            event.setDocumentId(documentId);
+            event.setIndexVersion(indexVersion);
+            event.setEventType(eventType);
+            event.setPayload(objectMapper.writeValueAsString(message));
+            event.setStatus("PENDING");
+            event.setRetryCount(0);
+            outboxMapper.insert(event);
+            log.info("索引 Outbox 已落库: eventId={}, documentId={}, version={}, type={}", event.getEventId(), documentId, indexVersion, eventType);
+        } catch (Exception e) {
+            throw new IllegalStateException("索引 Outbox 序列化失败", e);
+        }
     }
 
     // 上传文档
     // 0: 公开权限
     // 1: 私有权限
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Result uploadDocument(MultipartFile file, Long userId, Integer permission) {
         if (file.isEmpty()) {
             throw new BizException(FILE_NOT_EMPTY);
@@ -138,11 +160,12 @@ public class DocumentServiceImpl implements DocumentService {
                     .fileType(file.getContentType())
                     .status(DOC_STATUS_UPLOADED)
                     .permission(permission)
+                    .indexVersion(1)
                     .build();
             documentMapper.insert(document);
             Long docId = document.getId();
 
-            sendIngestMessage(docId, objectName, fileName);
+            createIndexEvent(docId, 1, "UPSERT", objectName, fileName);
 
             // 重新查询以获取数据库自动填充的字段（createTime、updateTime）
             Document saved = documentMapper.selectById(docId);
@@ -170,6 +193,7 @@ public class DocumentServiceImpl implements DocumentService {
      * @return
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Result deleteDocument(Long documentId, Long userId) throws Exception {
         Document document = documentMapper.selectById(documentId);
         if (document == null) {
@@ -179,9 +203,8 @@ public class DocumentServiceImpl implements DocumentService {
             throw new BizException(FILE_NO_PERMISSION);
         }
 
-        deleteVector(documentId);
-        deleteMinioFile(document.getFilePath());
-        documentMapper.deleteById(documentId);
+        documentMapper.updateStatus(documentId, "DELETED");
+        createIndexEvent(documentId, document.getIndexVersion(), "DELETE", null, null);
         summaryCacheService.invalidate(documentId);
 
         log.info("文档删除成功: documentId={}", documentId);
@@ -189,6 +212,7 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Result reIngestDocument(Long documentId, Long userId) {
         Document document = documentMapper.selectById(documentId);
         if (document == null) {
@@ -199,11 +223,12 @@ public class DocumentServiceImpl implements DocumentService {
         }
 
         try {
-            deleteVector(documentId);
             summaryCacheService.invalidate(documentId);
-            documentMapper.updateStatus(documentId, Constants.DOC_STATUS_PROCESSING);
-
-            sendIngestMessage(documentId, document.getFilePath(), document.getFileName());
+            int nextVersion = document.getIndexVersion() + 1;
+            document.setIndexVersion(nextVersion);
+            document.setStatus(Constants.DOC_STATUS_PROCESSING);
+            documentMapper.updateDocument(document);
+            createIndexEvent(documentId, nextVersion, "UPSERT", document.getFilePath(), document.getFileName());
 
             return Result.ok();
         } catch (Exception e) {
@@ -230,6 +255,7 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Result overwriteDocument(Long oldDocId, MultipartFile file, Long userId, Integer permission) {
         Document oldDoc = documentMapper.selectById(oldDocId);
         if (oldDoc == null) {
@@ -240,7 +266,6 @@ public class DocumentServiceImpl implements DocumentService {
         }
 
         try {
-            deleteVector(oldDocId);
             summaryCacheService.invalidate(oldDocId);
             deleteMinioFile(oldDoc.getFilePath());
 
@@ -252,9 +277,10 @@ public class DocumentServiceImpl implements DocumentService {
             oldDoc.setStatus(DOC_STATUS_UPLOADED);
             oldDoc.setFileName(file.getOriginalFilename());
             oldDoc.setPermission(permission);
+            oldDoc.setIndexVersion(oldDoc.getIndexVersion() + 1);
             documentMapper.updateDocument(oldDoc);
 
-            sendIngestMessage(oldDocId, objectName, file.getOriginalFilename());
+            createIndexEvent(oldDocId, oldDoc.getIndexVersion(), "UPSERT", objectName, file.getOriginalFilename());
 
             Document saved = documentMapper.selectById(oldDocId);
             return Result.ok(saved);
@@ -269,5 +295,22 @@ public class DocumentServiceImpl implements DocumentService {
     public void updateDocumentStatus(Long documentId, String status) {
         documentMapper.updateStatus(documentId, status);
         log.info("文档状态已更新: documentId={}, status={}", documentId, status);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void activateDocumentIndex(Long documentId, Integer indexVersion, String eventId) {
+        documentMapper.activateIndexVersion(documentId, indexVersion);
+        if (eventId != null && !eventId.isBlank()) {
+            outboxMapper.markIndexed(eventId);
+        }
+        log.info("文档索引版本已激活: documentId={}, version={}", documentId, indexVersion);
+    }
+
+    public void markIndexEventProcessing(String eventId) {
+        outboxMapper.markProcessing(eventId);
+    }
+
+    public void retryIndexEvent(String eventId, String error) {
+        outboxMapper.markRetry(eventId, error == null ? "consumer failed" : error.substring(0, Math.min(error.length(), 900)));
     }
 }

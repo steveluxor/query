@@ -33,6 +33,20 @@ cookies.txt
 desktop.ini
 待修改.txt
 
+# Local resume and document-rendering artifacts
+.claude/
+.docx_*preview*
+.resume_*preview*
+.docx_v7_qa/
+_resume_v*_render/
+tmp_resume_v*_render*/
+.codex_resume_*/
+.docx_v10_*_render/
+tmp/
+
+# Generated evaluation output
+tests/reports/
+
 # docs: 保留 archive，其余不上传
 docs/*
 !docs/archive/

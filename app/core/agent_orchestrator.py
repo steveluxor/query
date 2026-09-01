@@ -1,6 +1,9 @@
 import asyncio
+import contextlib
 import logging
+import os
 import re
+import socket
 import time
 
 from app.core.actions import ActionRegistry
@@ -14,6 +17,7 @@ from app.core.agent_registry import create_default_registry
 from app.core.workflow_validator import WorkflowValidator, PolicyValidator, GoalValidator, DAGDataFlowValidator
 from app.exceptions import PlannerError, WorkflowValidationError
 from app.models.task_graph import TaskGraph, TaskNode, TaskStatus
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,7 @@ class AgentOrchestrator:
 
         # Action Registry（ControlAction 分发，新增 action type 只需注册 Handler）
         self.action_registry = ActionRegistry().create_default()
+        self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
 
     async def run(self, context: AgentContext) -> AgentContext:
         await context.emit(EventType.RUNTIME_STARTED, {
@@ -53,11 +58,13 @@ class AgentOrchestrator:
 
         # 2. 创建 per-request MCP session
         context.mcp_session_id = await self.mcp_client.create_session()
+        await self._renew_run_lease(context)
+        lease_task = asyncio.create_task(self._lease_heartbeat(context))
 
         # 3. 设置文档权限（per-session）
         if context.document_ids:
             await self.mcp_client.call_tool(
-                "set_document_ids", {"ids": context.document_ids},
+                "set_document_ids", {"ids": context.document_ids, "versions": context.document_versions or {}},
                 session_id=context.mcp_session_id,
             )
 
@@ -82,19 +89,25 @@ class AgentOrchestrator:
                 logger.warning("[Orchestrator] Planner 异常: %s，使用 fallback 计划", e)
                 plan = self._fallback_plan(context.question)
 
-            # 5a. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
+            # 5a. Planner goal 是解析历史指代后的完整语义，供检索和审核使用。
             if plan and plan.tasks:
-                plan = self._post_process_plan(plan, context.question, context.memory_context)
+                context.resolved_question = self._resolve_question(plan, context.question)
+
+            # 5b. Plan 后处理：LLM 可能不遵守规则，代码层兜底修正
+            if plan and plan.tasks:
+                plan = self._post_process_plan(plan, context.resolved_question, context.memory_context)
 
             if plan and plan.tasks:
                 context.plan = plan
+                planner_duration = int((time.time() - plan_start) * 1000)
+                context.planner_duration_ms = planner_duration
+                await self._checkpoint_plan(context)
                 # 记录 Planner 步骤到 trace（供前端展示）
                 context.steps.append(AgentStep(
                     name="Planner",
-                    duration_ms=int((time.time() - plan_start) * 1000),
+                    duration_ms=planner_duration,
                     summary=f"生成 {len(plan.tasks)} 节点 DAG",
                 ))
-                planner_duration = int((time.time() - plan_start) * 1000)
                 logger.info("[Orchestrator] Planner 耗时 %dms，生成 %d 节点 DAG",
                             planner_duration, len(plan.tasks))
                 await context.emit(EventType.PLAN_GENERATED, {
@@ -112,6 +125,9 @@ class AgentOrchestrator:
                 await self._execute_plan(context, plan)
 
         finally:
+            lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lease_task
             # 确保偏好检测后台任务完成（所有路径，避免遗留挂起 task）
             if pref_task:
                 try:
@@ -127,11 +143,127 @@ class AgentOrchestrator:
 
         return context
 
+    async def _restore_mcp_search_contexts(self, context: AgentContext) -> None:
+        """Rehydrate stateful MCP search contexts from completed Retrieval outputs."""
+        for task in context.plan.tasks:
+            if task.agent != "retrieval" or task.status != TaskStatus.COMPLETED:
+                continue
+            entry = context.get_output_entry("document_bundle", task_id=task.id)
+            bundle = entry.value if entry else None
+            chunks = getattr(bundle, "chunks", []) if bundle else []
+            if not chunks:
+                logger.warning("[Orchestrator] %s 缺少可恢复的检索输出，重新执行 Retrieval", task.id)
+                task.status = TaskStatus.RETRYING
+                task.summary = "检索状态无法恢复，等待重新执行"
+                continue
+            try:
+                await self.mcp_client.call_tool(
+                    "restore_search_context",
+                    {
+                        "source_task_id": task.id,
+                        "chunks": [
+                            {"source": chunk.source, "content": chunk.content}
+                            for chunk in chunks
+                        ],
+                    },
+                    session_id=context.mcp_session_id,
+                )
+                logger.info("[Orchestrator] 已恢复 %s 的 MCP 搜索上下文 (%d chunks)", task.id, len(chunks))
+            except Exception as e:
+                logger.warning("[Orchestrator] 恢复 %s 的 MCP 搜索上下文失败，将重新检索: %s", task.id, e)
+                task.status = TaskStatus.RETRYING
+                task.summary = "检索状态恢复失败，等待重新执行"
+
+    async def resume(self, context: AgentContext) -> AgentContext:
+        """Continue a checkpointed run without asking Planner to generate a new DAG."""
+        if not context.plan:
+            raise ValueError("恢复执行缺少 TaskGraph checkpoint")
+
+        # A process can only have died while a task was running. Its partial
+        # output is not trusted, so requeue it from the last completed boundary.
+        for task in context.plan.tasks:
+            if task.status == TaskStatus.RUNNING:
+                task.status = TaskStatus.RETRYING
+                task.summary = "Worker 中断，等待恢复执行"
+
+        await context.emit(EventType.RUNTIME_STARTED, {
+            "session_id": context.session_id,
+            "question": context.question,
+            "recovered": True,
+        })
+        await self._restore_memory(context)
+        context.mcp_session_id = await self.mcp_client.create_session()
+        await self._renew_run_lease(context)
+        lease_task = asyncio.create_task(self._lease_heartbeat(context))
+        if context.document_ids:
+            await self.mcp_client.call_tool(
+                "set_document_ids", {"ids": context.document_ids, "versions": context.document_versions or {}},
+                session_id=context.mcp_session_id,
+            )
+        await self._restore_mcp_search_contexts(context)
+
+        try:
+            await self._checkpoint_plan(context)
+            await context.emit(EventType.PLAN_GENERATED, {
+                "goal": context.plan.goal,
+                "recovered": True,
+                "planner": {
+                    "duration_ms": context.planner_duration_ms or 0,
+                    "summary": "从检查点恢复已生成的任务图",
+                },
+                "tasks": [
+                    {"id": task.id, "agent": task.agent, "objective": task.objective,
+                     "depends_on": task.depends_on, "status": task.status.value,
+                     "duration_ms": task.duration_ms, "summary": task.summary,
+                     "tools_used": task.tools_used}
+                    for task in context.plan.tasks
+                ],
+            })
+            await self._execute_plan(context, context.plan)
+        finally:
+            lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lease_task
+            await self.mcp_client.cleanup_session(context.mcp_session_id)
+
+        if context.session_id:
+            await asyncio.to_thread(self._update_memory, context)
+        return context
+
+    async def _renew_run_lease(self, context: AgentContext) -> None:
+        if context.run_state_store and context.run_id:
+            claimed = await context.run_state_store.renew_lease(context.run_id, self.worker_id)
+            if not claimed:
+                raise RuntimeError(f"run {context.run_id} 已被其他 Worker 接管")
+
+    async def _lease_heartbeat(self, context: AgentContext) -> None:
+        if not context.run_state_store or not context.run_id:
+            return
+        interval = max(1, settings.run_lease_seconds // 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._renew_run_lease(context)
+            except Exception as e:
+                logger.warning("[Orchestrator] run lease 续租失败: %s", e)
+
+    async def _checkpoint_plan(self, context: AgentContext) -> None:
+        if context.run_state_store and context.run_id and context.plan:
+            await context.run_state_store.checkpoint_plan(context)
+            await context.run_state_store.renew_lease(context.run_id, self.worker_id)
+
     # ==================== DAG 执行 ====================
+
+    @staticmethod
+    def _resolve_question(plan: TaskGraph, original_question: str) -> str:
+        """使用 Planner goal 补全上下文追问，保留原始问题用于展示。"""
+        goal = (plan.goal or "").strip()
+        generic_goals = {"", "回答", "回答问题", "回答用户问题", "目标描述"}
+        return goal if goal not in generic_goals else original_question
 
     async def _execute_plan(self, context: AgentContext, plan: TaskGraph):
         """执行 TaskGraph — 支持 Controller retry 导致的子图重新执行"""
-        original_question = context.question
+        original_question = context.resolved_question or context.question
         max_iterations = 10  # 防止 Controller 死循环
         plan_task_map = {t.id: t for t in plan.tasks}
 
@@ -176,6 +308,8 @@ class AgentOrchestrator:
                             if desc and desc.status in (TaskStatus.PENDING, TaskStatus.RETRYING):
                                 desc.status = TaskStatus.SKIPPED
                                 desc.summary = f"上游 {task.id} 失败，已跳过"
+                                if context.run_state_store:
+                                    await context.run_state_store.checkpoint_task(context, desc)
                                 if desc in pending:
                                     pending.remove(desc)
                     else:
@@ -325,6 +459,10 @@ class AgentOrchestrator:
         _task_objective_var.set(task.objective)
 
         task_start = time.time()
+        task.status = TaskStatus.RUNNING
+        if context.run_state_store:
+            await context.run_state_store.checkpoint_task(context, task)
+        await self._renew_run_lease(context)
 
         await context.emit(EventType.AGENT_STARTED, {
             "task_id": task.id,
@@ -362,6 +500,8 @@ class AgentOrchestrator:
                 await self.action_registry.handle(action, context, self)
 
             task.status = TaskStatus.COMPLETED
+            if context.run_state_store:
+                await context.run_state_store.checkpoint_task(context, task)
             await context.emit(EventType.AGENT_COMPLETED, {
                 "task_id": task.id,
                 "agent": task.agent,
@@ -377,6 +517,8 @@ class AgentOrchestrator:
             task.summary = f"失败: {e}"
             logger.error("[Orchestrator] task %s 执行失败: %s", task.id, e)
             task.status = TaskStatus.FAILED
+            if context.run_state_store:
+                await context.run_state_store.checkpoint_task(context, task, error=str(e))
             await context.emit(EventType.AGENT_FAILED, {
                 "task_id": task.id,
                 "agent": task.agent,
@@ -430,15 +572,6 @@ class AgentOrchestrator:
                     hq, ha = h.get('question', ''), h.get('answer', '')
                 history_lines.append(f"用户: {str(hq)[:100]}\n助手: {str(ha)[:200]}")
             prompt += "\n\n最近对话历史：\n" + "\n---\n".join(history_lines)
-        # 短追问 + memory 中有数值计算工具名 + 问题本身是延续性追问 → 补全上下文
-        if len(question.strip()) < 10 and memory_context and (
-            "数值求和" in memory_context or "数值排名" in memory_context
-        ):
-            continuation_kw = ("结果", "继续", "然后", "接着", "答案", "汇总", "总结",
-                               "result", "continue", "next", "then")
-            if any(kw in question.strip().lower() for kw in continuation_kw):
-                logger.info("[Orchestrator] 检测到短追问+数值计算上下文，补全问题: '%s'", question)
-                question = f"{question}（这是对上一轮数值计算的简短追问。注意：需要完整的 retrieval→extractor→analysis→generator 链路，analysis 做精确数值计算，extractor 提取结构化知识，generator 汇总后给出最终结果）"
         prompt += f"\n\n用户问题：{question}"
 
         try:
@@ -507,6 +640,7 @@ class AgentOrchestrator:
         """
         lower_q = question.strip().lower()
         has_analysis = any(t.agent == "analysis" for t in plan.tasks)
+        is_chat_only = len(plan.tasks) == 1 and plan.tasks[0].agent == "chat"
 
         # === 规则 1：数值问题强制包含 analysis ===
         sum_keywords = ("花了多少钱", "总共", "合计", "总金额", "总和", "求和", "sum", "total",
@@ -522,7 +656,8 @@ class AgentOrchestrator:
         needs_sum = any(kw in lower_q for kw in sum_keywords)
         needs_rank = any(kw in lower_q for kw in rank_keywords) or any(re.search(p, lower_q) for p in rank_patterns)
 
-        if (needs_sum or needs_rank) and not has_analysis:
+        # Chat 已基于对话上下文直接产出答案，没有检索 SearchContext，不能再追加 analysis。
+        if (needs_sum or needs_rank) and not has_analysis and not is_chat_only:
             logger.info("[Orchestrator] 检测到数值问题但无 analysis，自动修正 plan")
             retrieval_task = next((t for t in plan.tasks if t.agent == "retrieval"), None)
             if not retrieval_task:
@@ -565,9 +700,8 @@ class AgentOrchestrator:
                         t.port_bindings.pop(k, None)
 
         # === 规则 3：所有非 chat DAG 必须包含 critic ===
-        has_chat_only = len(plan.tasks) == 1 and plan.tasks[0].agent == "chat"
         has_critic = any(t.agent == "critic" for t in plan.tasks)
-        if not has_chat_only and not has_critic:
+        if not is_chat_only and not has_critic:
             generator_task = next((t for t in plan.tasks if t.agent == "generator"), None)
             retrieval_task = next((t for t in plan.tasks if t.agent == "retrieval"), None)
             extractor_task = next((t for t in plan.tasks if t.agent == "extractor"), None)

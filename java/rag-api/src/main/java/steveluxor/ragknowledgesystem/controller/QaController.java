@@ -38,9 +38,16 @@ public class QaController {
     }
 
     @GetMapping(value = "/runtime/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamRuntime(@PathVariable("runId") String runId) {
+    public SseEmitter streamRuntime(
+            @PathVariable("runId") String runId,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
         log.info("SSE Runtime 连接: runId={}", runId);
-        return qaService.streamRuntime(runId);
+        return qaService.streamRuntime(runId, lastEventId);
+    }
+
+    @GetMapping("/active-runtime")
+    public Result activeRuntime(@RequestParam("sessionId") Long sessionId) {
+        return qaService.getActiveRuntime(sessionId);
     }
 
     @PostMapping("/callback")

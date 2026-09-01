@@ -114,6 +114,34 @@ def test_build_prompt_with_int_list_values(agent):
     assert "100, 200, 300" in prompt
 
 
+def test_build_prompt_uses_preferences_without_repeating_context(agent):
+    context = AgentContext(
+        question="那个结论再解释一下",
+        history=[{"question": "什么是动态 top_k？", "answer": "按距离断层确定数量。"}],
+        memory_context="用户偏好：回答简洁。",
+        preferences={"style": "简洁"},
+    )
+
+    prompt = agent._build_prompt(context)
+
+    assert "什么是动态 top_k？" not in prompt
+    assert "按距离断层确定数量。" not in prompt
+    assert "用户偏好：回答简洁。" not in prompt
+    assert '用户偏好：{"style": "简洁"}' in prompt
+    assert "以本轮证据、计算结果和代码执行结果为准" in prompt
+
+
+def test_build_prompt_uses_resolved_question(agent):
+    context = AgentContext(
+        question="哪个最高？",
+        resolved_question="统计上一轮各品牌花费并确认花费最高的品牌。",
+    )
+
+    prompt = agent._build_prompt(context)
+
+    assert "用户问题：统计上一轮各品牌花费并确认花费最高的品牌。" in prompt
+
+
 @pytest.mark.anyio
 async def test_build_prompt_knowledge_objects_priority(agent):
     """验证 prompt 中 knowledge_objects 出现在 evidence 之前"""

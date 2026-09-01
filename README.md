@@ -368,6 +368,14 @@ Extractor 输出精简（attributes 短语化 + evidence 核心断言 50-80 字�
 
 MCP Server 层 LLM 批量判断文档摘要与问题相关性，过滤后**写回 search context**（`last_search_chunks` + 惰性缓存失效），`read_all_rows`/`calculate_*` 只看到相关文档；Code prompt 增加按 `文件` 字段的数据范围守卫。无关文档（如账单）不会全量泄漏给 analysis/code。
 
+### 11. Dense + BM25 混合检索与 RRF 融合
+
+Chroma 保留为 Dense 向量召回，独立 RediSearch 服务保存经 `jieba` 分词的稀疏倒排索引，二者以稳定 `chunk_id` 关联。查询先在用户授权的 `document_id` 范围内分别取 Dense/BM25 候选，再以 Reciprocal Rank Fusion（RRF）合并排序；文件名匹配保留为召回为空或未覆盖文档时的兜底补充。
+
+索引写入采用版本化 Outbox：Java 在同一 MySQL 事务中更新文档版本并写入 `index_outbox`，发布器收到 RabbitMQ broker confirm 后标记已发布；消费者将 Chroma Dense 与 RediSearch BM25 都写完后，才回调激活 `active_index_version`。检索只读取激活版本，构建失败时保留旧版本可读，避免两路索引半成品混用。历史 Chroma chunk 可用 `scripts/rebuild_sparse_index.py` 回填 `chunk_id` 并重建稀疏索引。BM25 故障时显式降级为 Dense-only，避免检索链路整体不可用。RediSearch 使用独立密码、AOF 和命名卷，不与 checkpoint/会话缓存 Redis 混用。
+
+`index_outbox` 状态为 `PENDING -> PUBLISHED -> PROCESSING -> INDEXED`；消费失败进入 `RETRYING` 并退避重投，累计 5 次失败标记 `FAILED`，发布或处理中超时的事件由补偿扫描重新投递。当前未接入独立死信队列和 Chroma/RediSearch 全量对账任务。
+
 ---
 
 ## 关键设计决策（为什么）
@@ -400,8 +408,8 @@ DeepSeek 高延迟下 30s 默认超时会让 SDK 自动重试 ×2，一次慢调
 | 领域 Agent | 7 个 |
 | MCP 工具 | 10 个（8 个面向用户 + 2 个内部工具） |
 | DAG 校验层 | 6 层 |
-| Docker 服务 | 9 个 |
-| 数据库 | MySQL + Redis + ChromaDB |
+| Docker 服务 | 10 个 |
+| 数据与检索存储 | MySQL + Redis + RediSearch + ChromaDB + MinIO |
 | SSE 端点 | 1 个（Java 透传，单流）|
 | API 端点 | 16 个 |
 
@@ -417,11 +425,13 @@ DeepSeek 高延迟下 30s 默认超时会让 SDK 自动重试 ×2，一次慢调
                                     ↓
                              Python(:8000)
                                ├── Ollama(:11434) Embedding
-                               ├── ChromaDB(本地) 向量库
+                               ├── ChromaDB(持久卷) Dense 向量召回
+                               └── RediSearch(:6379, 内网) BM25 稀疏召回
                              Java(:8085)
                                ├── MySQL 数据库
                                ├── Redis(:6379) 缓存
                                └── MinIO(:9000) 文件存储
+                             RabbitMQ(:5672) → Stream Consumer → Python 入库
 ```
 
 ```bash
@@ -438,10 +448,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 | 层级 | 技术 |
 |------|------|
-| 后端框架 | Python 3.11 + FastAPI + asyncio |
+| 后端框架 | Python 3.12 + FastAPI + asyncio |
 | AI 核心 | LangChain + DeepSeek API + Ollama Embeddings |
-| 向量数据库 | ChromaDB |
-| 缓存 | Redis |
+| Dense 检索 | ChromaDB + Ollama Embeddings |
+| Sparse 检索 | RediSearch + jieba + BM25 |
+| 融合排序 | RRF（以稳定 `chunk_id` 去重） |
+| 缓存与运行态 | Redis |
 | 关系数据库 | MySQL (Spring Boot + MyBatis) |
 | 工具协议 | MCP (Model Context Protocol) |
 | 实时推送 | SSE + RuntimeEventBus + Java SseEmitter |
@@ -458,7 +470,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-> 详细架构设计文档见 [docs/archive/CLAUDE_MultiAgent_v12.md](docs/archive/CLAUDE_MultiAgent_v12.md)
+> 详细架构设计文档见 [docs/archive/CLAUDE_MultiAgent_v14.md](docs/archive/CLAUDE_MultiAgent_v14.md)
 
 ---
 
@@ -475,5 +487,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 设计 SSE 单流 + Java 透传架构：Python 无状态，RuntimeEventBus per-run pub-sub + 历史缓存；双端心跳保活、callback 鉴权容错、并行分支检索上下文隔离，前端实时接收 DAG 状态和 Agent 执行进度
 - 实现 CodeAgent Sandbox，通过进程隔离、资源限制和模块白名单降低 LLM 生成代码执行风险
 - 优化 LLM 推理管线：Extractor 输出精简（attributes 短语化 + evidence 核心断言），Generator token budget，Critic slim prompt，全链路 Token Metrics
+- 实现 Dense + BM25 混合检索：Chroma 与 RediSearch 双路召回，以版本化稳定 Chunk ID 做 RRF 融合；支持历史索引回填、权限范围过滤、Dense-only 降级及 Outbox 驱动的双索引版本激活
 - 可靠性加固：全局 LLM 超时 120s 消除慢 API 重试空转；搜索相关性过滤写回上下文收敛下游数据范围；模板花括号转义防 KeyError
 - 实现用户手动停止：回答过程中随时中断 DAG，先发取消事件（SSE 流干净结束）再取消 asyncio 任务，取消的 run 跳过持久化不产生半成品记录

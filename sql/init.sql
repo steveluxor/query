@@ -24,10 +24,31 @@ CREATE TABLE IF NOT EXISTS document (
     status VARCHAR(50),
     permission INT,
     summary TEXT COMMENT '文档摘要（Python 生成）',
+    index_version INT NOT NULL DEFAULT 1 COMMENT '待构建的索引版本',
+    active_index_version INT DEFAULT NULL COMMENT '当前可查询的索引版本',
     create_time DATETIME,
     update_time DATETIME,
     create_user BIGINT,
     update_user BIGINT
+);
+
+-- Outbox 与 document 状态在同一 MySQL 事务提交；发布器可在 RabbitMQ 暂不可用时重试。
+CREATE TABLE IF NOT EXISTS index_outbox (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    event_id CHAR(36) NOT NULL,
+    document_id BIGINT NOT NULL,
+    index_version INT NOT NULL,
+    event_type VARCHAR(20) NOT NULL,
+    payload JSON NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    retry_count INT NOT NULL DEFAULT 0,
+    next_retry_time DATETIME DEFAULT NULL,
+    last_error VARCHAR(1000) DEFAULT NULL,
+    published_time DATETIME DEFAULT NULL,
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_index_outbox_event_id (event_id),
+    KEY idx_index_outbox_pending (status, id)
 );
 
 CREATE TABLE IF NOT EXISTS qa_session (

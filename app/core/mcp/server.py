@@ -1,11 +1,14 @@
 import asyncio
 import json
 import logging
+import re
 
+from langchain_core.documents import Document
 from mcp.server.fastmcp import FastMCP
 
 from app.config import settings
 from app.core.infra.vector_store import VectorStore
+from app.core.infra.sparse_store import SparseStore
 from app.core.infra.summary_cache import DocumentSummaryCache
 from app.core.rag_engine import RAGEngine, SearchContext
 from app.core.mcp.session_manager import SessionManager
@@ -45,25 +48,59 @@ async def _create_session(session_id: str) -> str:
 
 
 @mcp.tool()
-async def set_document_ids(session_id: str, ids: list[int]) -> str:
+async def set_document_ids(session_id: str, ids: list[int], versions: dict[int, int] | None = None) -> str:
     """设置当前用户有权限访问的文档 ID 列表。在搜索前必须调用。"""
     session = await session_mgr.get(session_id)
     session.document_ids = ids
+    session.document_versions = {int(key): int(value) for key, value in (versions or {}).items()}
     logger.info("[MCP] set_document_ids (session=%s): %d 个文档", session_id[:8], len(ids))
     return f"已设置 {len(ids)} 个可访问文档"
 
 
 @mcp.tool()
+async def restore_search_context(session_id: str, source_task_id: str, chunks: list[dict],
+                                 task_id: str = "", ctx_source_id: str = "") -> str:
+    """内部恢复工具：用 checkpoint 的检索结果重建 task 级 SearchContext。"""
+    session = await session_mgr.get(session_id)
+    restored_chunks = []
+    for item in chunks:
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        metadata = {"file_name": str(item.get("source", "未知文档"))}
+        row_match = re.search(r"^行号:\s*(\d+)", content, flags=re.MULTILINE)
+        if row_match:
+            metadata["row_number"] = int(row_match.group(1))
+        restored_chunks.append((Document(page_content=content, metadata=metadata), 0.0))
+
+    if not restored_chunks:
+        return "没有可恢复的检索数据"
+
+    ctx = SearchContext(
+        last_search_chunks=list(restored_chunks),
+        last_search_all_chunks=list(restored_chunks),
+        last_search_sources=list({item[0].metadata["file_name"] for item in restored_chunks}),
+        document_ids=session.document_ids,
+    )
+    session.search_ctx = ctx
+    session.search_contexts[source_task_id] = ctx
+    logger.info("[MCP] 已恢复搜索上下文 (session=%s, source_task=%s, chunks=%d)",
+                session_id[:8], source_task_id, len(restored_chunks))
+    return f"已恢复 {len(restored_chunks)} 条检索数据"
+
+
+@mcp.tool()
 async def search_documents(session_id: str, query: str, strategy: str = "standard",
                            row_start: int | None = None, row_end: int | None = None,
-                           task_id: str = "", ctx_source_id: str = "") -> str:
+                           task_id: str = "", ctx_source_id: str = "",
+                           original_question: str = "") -> str:
     """从知识库中搜索与问题相关的文档内容。需要查找具体信息、数据、记录时调用。搜索词应具体，包含数据中可能的列名。
     如果要查询特定行号范围（如"第90到100行"、"第91行之后"），请传入 row_start 和 row_end 参数。"""
     logger.info("[MCP] search_documents (session=%s, task=%s): query='%s', strategy=%s, row_start=%s, row_end=%s",
                 session_id[:8], task_id or "-", query, strategy, row_start, row_end)
 
     session = await session_mgr.get(session_id)
-    ctx = SearchContext(document_ids=session.document_ids)
+    ctx = SearchContext(document_ids=session.document_ids, document_versions=session.document_versions)
     raw_result = rag_engine._execute_search(query, row_start, row_end, ctx, strategy=strategy)
 
     # 缓存状态到 per-session
@@ -98,7 +135,11 @@ async def search_documents(session_id: str, query: str, strategy: str = "standar
             if doc_ids:
                 summaries = await summary_cache.get_batch(list(doc_ids))
                 if summaries:
-                    relevant_ids = await _judge_relevance(query, summaries)
+                    relevant_ids = await _judge_relevance(
+                        original_question=original_question or query,
+                        search_query=query,
+                        summaries=summaries,
+                    )
                     # 安全阀：过滤比例过高时跳过（可能误判）
                     if len(relevant_ids) < len(doc_ids) / 2:
                         logger.info("[MCP] 摘要过滤过于激进 (%d/%d)，跳过过滤",
@@ -204,11 +245,16 @@ async def read_all_rows(session_id: str, task_id: str = "", ctx_source_id: str =
 
 
 @mcp.tool()
-async def add_documents(session_id: str, document_id: int, texts: list[str], metadatas: list[dict]) -> str:
-    """向知识库添加文档切片（ingestion 专用）。先删除旧向量，再写入新切片。"""
-    logger.info("[MCP] add_documents (session=%s): document_id=%d, chunks=%d", session_id[:8], document_id, len(texts))
-    rag_engine.vector_store.delete_by_document_id(document_id)
+async def add_documents(session_id: str, document_id: int, texts: list[str], metadatas: list[dict], index_version: int = 1) -> str:
+    """写入不可见版本；Java 在 Chroma 和 RediSearch 都成功后才激活。"""
+    logger.info("[MCP] add_documents (session=%s): document_id=%d, version=%d, chunks=%d", session_id[:8], document_id, index_version, len(texts))
+    for metadata in metadatas:
+        metadata["index_version"] = index_version
+    rag_engine.vector_store.delete_by_document_id(document_id, index_version)
     rag_engine.vector_store.add_texts(texts, metadatas)
+    if rag_engine.sparse_store:
+        records = rag_engine.vector_store.get_document_index_records(document_id)
+        rag_engine.sparse_store.replace_document(document_id, records, index_version)
     return f"已添加 {len(texts)} 个切片"
 
 
@@ -217,6 +263,8 @@ async def delete_document(session_id: str, document_id: int) -> str:
     """从知识库中删除指定文档的所有切片。"""
     logger.info("[MCP] delete_document (session=%s): document_id=%d", session_id[:8], document_id)
     rag_engine.vector_store.delete_by_document_id(document_id)
+    if rag_engine.sparse_store:
+        rag_engine.sparse_store.delete_document(document_id)
     return f"已删除文档 {document_id}"
 
 
@@ -228,8 +276,9 @@ async def _cleanup_session(session_id: str) -> str:
     return "已清理"
 
 
-async def _judge_relevance(query: str, summaries: dict[int, str]) -> set[int]:
-    """LLM 批量判断文档相关性"""
+async def _judge_relevance(original_question: str, search_query: str,
+                           summaries: dict[int, str]) -> set[int]:
+    """LLM 批量判断文档相关性，以原始问题为准、改写词为辅助。"""
     if not summaries:
         return set(summaries.keys())
 
@@ -238,7 +287,9 @@ async def _judge_relevance(query: str, summaries: dict[int, str]) -> set[int]:
     )
 
     prompt = PromptManager.get("relevance", "judge").format(
-        question=query, summaries=summaries_text
+        original_question=original_question,
+        search_query=search_query,
+        summaries=summaries_text,
     )
     response = await llm.ainvoke(prompt)
 
@@ -255,7 +306,10 @@ async def main():
 
     # 初始化向量数据库和 RAG 引擎
     vs = VectorStore()
-    rag_engine = RAGEngine(vs)
+    sparse_store = SparseStore() if settings.search_redis_enabled else None
+    if sparse_store:
+        sparse_store.ensure_index()
+    rag_engine = RAGEngine(vs, sparse_store=sparse_store)
 
     # 初始化摘要缓存
     summary_cache = DocumentSummaryCache(

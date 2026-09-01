@@ -31,6 +31,10 @@ TEMP_DIR = "/tmp/rag_temp"
 _minio_client: minio.Minio | None = None
 
 
+def _internal_headers() -> dict[str, str]:
+    return {"X-Internal-Service-Token": settings.resolved_internal_service_token}
+
+
 def _get_minio_client() -> minio.Minio:
     """获取 MinIO 客户端（单例复用）"""
     global _minio_client
@@ -65,23 +69,76 @@ def update_document_status(document_id: int, status: str):
         logger.error(f"文档状态更新异常: documentId={document_id}, error={e}")
 
 
+def mark_event_processing(event_id: str | None):
+    if not event_id:
+        return
+    response = requests.put(
+        f"{settings.java_base_url}/document/internal/index-events/{event_id}/processing",
+        headers=_internal_headers(), timeout=10,
+    )
+    response.raise_for_status()
+
+
+def mark_event_retry(event_id: str | None, error: Exception | str):
+    if not event_id:
+        return
+    try:
+        response = requests.put(
+            f"{settings.java_base_url}/document/internal/index-events/{event_id}/retry",
+            json={"error": str(error)[:900]}, headers=_internal_headers(), timeout=10,
+        )
+        response.raise_for_status()
+    except Exception as callback_error:
+        logger.error("索引事件失败状态回写异常: eventId=%s, error=%s", event_id, callback_error)
+
+
+def activate_index_version(document_id: int, index_version: int, event_id: str | None):
+    """Only expose a version after the Python ingestion request has completed."""
+    response = requests.put(
+        f"{settings.java_base_url}/document/{document_id}/index-ready",
+        json={"indexVersion": index_version, "eventId": event_id or ""},
+        headers=_internal_headers(), timeout=10,
+    )
+    response.raise_for_status()
+
+
 def process_message(ch, method, properties, body):
     """处理单条向量化任务（RabbitMQ 回调）"""
     try:
         message = json.loads(body)
+        # Compatibility for records published by the pre-v15 publisher, which
+        # serialized the persisted JSON payload one extra time.
+        if isinstance(message, str):
+            message = json.loads(message)
+        if not isinstance(message, dict):
+            raise ValueError("消息体必须是 JSON 对象")
     except Exception as e:
         logger.error(f"消息解析失败: {e}, body={body}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         return
 
     document_id = int(message["documentId"])
-    file_path = message["filePath"]
-    file_name = message["fileName"]
+    index_version = int(message.get("indexVersion", 1))
+    event_type = message.get("eventType", "UPSERT")
+    event_id = message.get("eventId")
+    file_path = message.get("filePath")
+    file_name = message.get("fileName")
 
-    logger.info(f"开始处理向量化任务: documentId={document_id}, fileName={file_name}")
+    logger.info("开始索引事件: eventId=%s, documentId=%d, version=%d, type=%s",
+                message.get("eventId", "-"), document_id, index_version, event_type)
 
     temp_path = None
     try:
+        mark_event_processing(event_id)
+        if event_type == "DELETE":
+            response = requests.delete(f"{settings.python_base_url}{settings.ingest_path}/{document_id}", timeout=120)
+            response.raise_for_status()
+            # DELETE has no document activation callback, but it is still a completed index event.
+            activate_index_version(document_id, index_version, event_id)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            logger.info("索引删除完成: documentId=%d", document_id)
+            return
+
         # 1. 从 MinIO 下载到共享临时目录
         os.makedirs(TEMP_DIR, exist_ok=True)
         suffix = os.path.splitext(file_name)[1] if "." in file_name else ""
@@ -92,7 +149,9 @@ def process_message(ch, method, properties, body):
         ingest_req = {
             "file_path": temp_path,
             "document_id": document_id,
-            "file_name": file_name
+            "file_name": file_name,
+            "index_version": index_version,
+            "event_id": message.get("eventId"),
         }
         response = requests.post(
             f"{settings.python_base_url}{settings.ingest_path}",
@@ -101,16 +160,18 @@ def process_message(ch, method, properties, body):
         )
 
         if response.status_code == 200:
-            update_document_status(document_id, "COMPLETED")
-            logger.info(f"向量化成功: documentId={document_id}")
+            activate_index_version(document_id, index_version, event_id)
+            logger.info("双索引构建并激活成功: documentId=%d, version=%d", document_id, index_version)
             ch.basic_ack(delivery_tag=method.delivery_tag)
         else:
             update_document_status(document_id, "FAILED")
+            mark_event_retry(event_id, f"Python ingestion returned HTTP {response.status_code}")
             logger.error(f"向量化失败: documentId={document_id}, status={response.status_code}")
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     except Exception as e:
         update_document_status(document_id, "FAILED")
+        mark_event_retry(event_id, e)
         logger.error(f"向量化异常: documentId={document_id}, error={e}")
         try:
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
@@ -191,4 +252,3 @@ def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     main()
-

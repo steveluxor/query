@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.agent_context import AgentContext
+from app.core.agent_context import AgentContext, _task_objective_var
 from app.core.agents.retrieval_agent import RetrievalAgent
 from app.models.data_types import DocumentBundle
 
@@ -126,6 +126,42 @@ async def test_run_aggregation_uses_strict_strategy(agent, context, mock_mcp):
     call = mock_mcp.call_tool.call_args_list[0]
     assert call[0][0] == "search_documents"
     assert call[0][1]["strategy"] == "strict"
+    assert call[0][1]["original_question"] == context.question
+
+
+@pytest.mark.anyio
+async def test_run_passes_original_question_when_planner_rewrites_the_task(agent, mock_mcp):
+    context = AgentContext(question="比较 2024 年 A 产品和 B 产品的销售额")
+    mock_mcp.call_tool.return_value = "没有找到相关内容"
+    agent._generate_query = AsyncMock(return_value=("销售额对比", "comparison"))
+    token = _task_objective_var.set("查询销售数据")
+
+    try:
+        await agent.run(context, mcp_client=mock_mcp, mcp_session_id="s1")
+    finally:
+        _task_objective_var.reset(token)
+
+    arguments = mock_mcp.call_tool.call_args.args[1]
+    assert arguments["query"] == "销售额对比"
+    assert arguments["original_question"] == context.question
+
+
+@pytest.mark.anyio
+async def test_run_uses_resolved_question_for_context_follow_up(agent, mock_mcp):
+    context = AgentContext(
+        question="哪个最高",
+        resolved_question="统计上一轮各品牌花费并确认花费最高的品牌",
+    )
+    mock_mcp.call_tool.return_value = "没有找到相关内容"
+    agent._generate_query = AsyncMock(return_value=("各品牌花费最高", "comparison"))
+
+    await agent.run(context, mcp_client=mock_mcp, mcp_session_id="s1")
+
+    agent._generate_query.assert_awaited_once_with(
+        context.resolved_question, None, original_question=context.resolved_question
+    )
+    arguments = mock_mcp.call_tool.call_args.args[1]
+    assert arguments["original_question"] == context.resolved_question
 
 
 @pytest.mark.anyio

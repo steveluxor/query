@@ -1,4 +1,4 @@
-"""Redis 读取封装（只读，写入由 Java 负责）"""
+"""Redis access for history/memory and resumable runtime state."""
 import json
 import logging
 
@@ -6,14 +6,16 @@ import redis.asyncio as aioredis
 
 from app.config import settings
 from app.core.agent_memory import AgentMemory
+from app.core.infra.run_state_store import RunStateStore
 
 logger = logging.getLogger(__name__)
 
 
 class RedisStore:
-    """Redis 读取封装
+    """Redis access facade.
 
-    Python 只读 Redis 不写。写入由 Java 在收到 response 后完成。
+    Java remains responsible for durable user-facing history. Python owns only
+    short-lived execution checkpoints required to resume an interrupted run.
     """
 
     def __init__(self):
@@ -24,6 +26,7 @@ class RedisStore:
             db=settings.redis_db,
             decode_responses=True,
         )
+        self.run_state = RunStateStore(self.client)
 
     async def get_recent_history(self, session_id: str, limit: int = 10) -> list[dict]:
         """读取 Redis 中最近 N 轮对话"""

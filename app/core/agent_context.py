@@ -40,17 +40,22 @@ class AgentContext:
 
     # ==================== 系统字段（初始化后只读） ====================
     question: str
+    user_id: int | None = None
     session_id: str | None = None
     mcp_session_id: str = ""
     document_ids: list[int] | None = None
+    document_versions: dict[int, int] | None = None
     history: list[dict] | None = None
     memory_context: str | None = None
+    resolved_question: str | None = None
     preferences: dict | None = None
     plan: TaskGraph | None = None
+    planner_duration_ms: int | None = None
 
     # ==================== SSE Streaming ====================
     run_id: str = ""
     event_bus: object | None = None  # RuntimeEventBus（避免循环导入，用 object）
+    run_state_store: object | None = None  # RunStateStore，运行中 checkpoint/event 持久化
 
     # ==================== Agent 数据交换容器 ====================
     # key -> {task_id: AgentOutput} — 每个 output key 可被多个 task 写入
@@ -174,10 +179,15 @@ class AgentContext:
 
     async def emit(self, event_type, data: dict | None = None):
         """便捷发射 SSE 事件（仅在 event_bus 存在时生效）"""
-        if self.event_bus and self.run_id:
+        if not self.run_id:
+            return
+        payload = data or {}
+        if self.run_state_store:
+            await self.run_state_store.append_event(self.run_id, event_type.value, payload)
+        if self.event_bus:
             from app.core.runtime_event_bus import RuntimeEvent
             await self.event_bus.publish(RuntimeEvent(
                 run_id=self.run_id,
                 type=event_type,
-                data=data or {},
+                data=payload,
             ))

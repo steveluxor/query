@@ -68,6 +68,51 @@ def _make_execute_mock(side_effect=None):
 
 class TestDAGExecution:
 
+    def test_context_chat_rank_question_does_not_add_analysis(self, orchestrator):
+        """上下文追问命中纯 Chat DAG 时，不应因“最高”自动追加 analysis。"""
+        plan = TaskGraph(
+            goal="",
+            goal_outputs=["answer"],
+            tasks=[TaskNode(id="task1", agent="chat", objective="根据历史回答哪个品牌最高")],
+        )
+
+        result = orchestrator._post_process_plan(plan, "哪个品牌最高", "上一轮已给出品牌统计")
+
+        assert [task.agent for task in result.tasks] == ["chat"]
+
+    def test_resolve_question_uses_specific_planner_goal(self, orchestrator):
+        plan = TaskGraph(goal="统计上一轮各品牌花费并确认最高品牌")
+
+        assert orchestrator._resolve_question(plan, "哪个最高") == "统计上一轮各品牌花费并确认最高品牌"
+
+    def test_resolve_question_falls_back_for_generic_goal(self, orchestrator):
+        plan = TaskGraph(goal="回答问题")
+
+        assert orchestrator._resolve_question(plan, "哪个最高") == "哪个最高"
+
+    @pytest.mark.anyio
+    async def test_short_follow_up_is_not_rewritten_to_full_pipeline(
+        self, orchestrator, mock_llm, mock_mcp_client
+    ):
+        """Planner 应依据 history/memory 路由，而非强制补全短追问。"""
+        mock_mcp_client.call_tool = AsyncMock(return_value="")
+        mock_llm.invoke.return_value = MagicMock(content='''
+        {"goal": "", "goal_outputs": ["answer"], "tasks": [
+          {"id": "task1", "agent": "chat", "objective": "根据历史回答", "depends_on": []}
+        ]}
+        ''')
+
+        plan = await orchestrator._plan(
+            "结果",
+            memory_context="已知事实：上一轮使用了数值求和。",
+            history=[{"question": "总额是多少？", "answer": "总额为 100。"}],
+        )
+
+        planner_prompt = mock_llm.invoke.call_args.args[0][0][1]
+        assert "用户问题：结果" in planner_prompt
+        assert "必须完整的 retrieval" not in planner_prompt
+        assert [task.agent for task in plan.tasks] == ["chat"]
+
     @pytest.mark.anyio
     async def test_retrieval_extractor_generator(self, orchestrator, mock_mcp_client):
         """Retrieval → Extractor → Generator 全链路"""

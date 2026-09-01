@@ -14,6 +14,7 @@ class MCPSession:
     """
     session_id: str
     document_ids: list[int] = field(default_factory=list)
+    document_versions: dict[int, int] = field(default_factory=dict)
     search_ctx: Any = None       # SearchContext (backward compat, non-DAG path)
     search_contexts: dict[str, Any] = field(default_factory=dict)  # task_id -> SearchContext（防御性：并行分支隔离用，当前 planner 单检索下实际最多 1 项）
     user_id: str | None = None

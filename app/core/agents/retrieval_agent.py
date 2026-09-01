@@ -47,11 +47,13 @@ class RetrievalAgent(BaseAgent):
     )
 
     async def run(self, context: AgentContext, mcp_client=None, mcp_session_id: str = "", **kwargs) -> AgentContext:
-        question = _task_objective_var.get() or context.question
-        original_question = kwargs.get("original_question", question)
+        question = context.resolved_question or _task_objective_var.get() or context.question
+        original_question = kwargs.get("original_question") or question
+        # Planner 已将指代解析为完整语义时，不重复传入历史。
+        query_history = None if context.resolved_question and context.resolved_question != context.question else context.history
 
         # 1. LLM 生成搜索词 + 查询类型（单次调用，temperature=0）
-        search_query, query_type = await self._generate_query(question, context.history, original_question=original_question)
+        search_query, query_type = await self._generate_query(question, query_history, original_question=original_question)
         logger.info("[Retrieval] 搜索词: %s, 类型: %s", search_query, query_type)
 
         # 2. 按策略搜索（aggregation→strict 单文档, comparison→standard 多文档）
@@ -59,7 +61,15 @@ class RetrievalAgent(BaseAgent):
         search_text = ""
         full_text = ""
         try:
-            raw = await mcp_client.call_tool("search_documents", {"query": search_query, "strategy": strategy}, session_id=mcp_session_id)
+            raw = await mcp_client.call_tool(
+                "search_documents",
+                {
+                    "query": search_query,
+                    "strategy": strategy,
+                    "original_question": original_question,
+                },
+                session_id=mcp_session_id,
+            )
             raw_str = str(raw)
             # 解析 JSON 包装
             try:

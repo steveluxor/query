@@ -29,6 +29,8 @@ public interface DocumentMapper {
     // 更新文档状态
     void updateStatus(@Param("id") Long id, @Param("status") String status);
 
+    void activateIndexVersion(@Param("id") Long id, @Param("indexVersion") Integer indexVersion);
+
     // 更新文档信息
     void updateDocument(Document document);
 

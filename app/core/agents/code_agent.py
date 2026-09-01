@@ -58,6 +58,14 @@ class CodeAgent(BaseAgent):
         except Exception as e:
             logger.warning("[Code] read_all_rows 失败: %s", e)
 
+        # 续跑时 MCP 子进程可能尚未恢复工具态；DAG 已注入的 Retrieval 输出是同一份 checkpoint 数据。
+        if not data_rows and document_bundle and getattr(document_bundle, "chunks", None):
+            bundle_text = "\n\n".join(
+                f"[{chunk.source}]\n{chunk.content}" for chunk in document_bundle.chunks
+            )
+            data_rows = self._parse_rows_from_text(bundle_text)
+            logger.warning("[Code] MCP 未返回数据，回退使用 DocumentBundle，解析出 %d 行", len(data_rows))
+
         context_vars = {
             "data": data_rows,
             "question": _task_objective_var.get() or context.question,

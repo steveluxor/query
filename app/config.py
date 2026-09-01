@@ -57,8 +57,18 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_password: str = ""
     redis_db: int = 0
+    # 运行中 DAG checkpoint 的保留窗口。最终问答记录仍由 Java 写入 MySQL。
+    run_state_ttl_seconds: int = 24 * 60 * 60
+    run_lease_seconds: int = 30
     redis_history_key_prefix: str = "qa:history:"
     redis_memory_key_prefix: str = "qa:memory:"
+
+    # RediSearch：独立于运行态 Redis，提供 BM25 稀疏召回。
+    search_redis_enabled: bool = False
+    search_redis_host: str = "localhost"
+    search_redis_port: int = 6380
+    search_redis_password: str = ""
+    search_redis_index_name: str = "rag_chunks"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

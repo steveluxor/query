@@ -13,6 +13,8 @@
             <if test="status != null">status,</if>
             <if test="permission != null">permission,</if>
             <if test="summary != null">summary,</if>
+            <if test="indexVersion != null">index_version,</if>
+            <if test="activeIndexVersion != null">active_index_version,</if>
             <if test="createUser != null">create_user,</if>
             <if test="updateUser != null">update_user,</if>
             create_time,
@@ -27,6 +29,8 @@
             <if test="status != null">#{status},</if>
             <if test="permission != null">#{permission},</if>
             <if test="summary != null">#{summary},</if>
+            <if test="indexVersion != null">#{indexVersion},</if>
+            <if test="activeIndexVersion != null">#{activeIndexVersion},</if>
             <if test="createUser != null">#{createUser},</if>
             <if test="updateUser != null">#{updateUser},</if>
             #{createTime},
@@ -52,12 +56,17 @@
 
     <select id="selectByUserId" resultType="steveluxor.ragknowledgesystem.entity.Document">
         select * from document
-        where user_id = #{userId} or permission = 0
+        where (user_id = #{userId} or permission = 0) and status != 'DELETED'
         order by create_time desc
     </select>
 
     <update id="updateStatus">
         update document set status = #{status} where id = #{id}
+    </update>
+
+    <update id="activateIndexVersion">
+        update document set active_index_version = #{indexVersion}, status = 'COMPLETED', update_time = NOW()
+        where id = #{id} and index_version = #{indexVersion} and status != 'DELETED'
     </update>
 
     <update id="updateDocument" parameterType="steveluxor.ragknowledgesystem.entity.Document">
@@ -70,6 +79,8 @@
             <if test="status != null">status = #{status},</if>
             <if test="permission != null">permission = #{permission},</if>
             <if test="summary != null">summary = #{summary},</if>
+            <if test="indexVersion != null">index_version = #{indexVersion},</if>
+            <if test="activeIndexVersion != null">active_index_version = #{activeIndexVersion},</if>
             update_time = NOW()
         </trim>
         where id = #{id}
@@ -80,7 +91,7 @@
     </delete>
 
     <select id="selectOwnByUserId" resultType="steveluxor.ragknowledgesystem.entity.Document">
-        select * from document where user_id = #{userId} order by create_time desc
+        select * from document where user_id = #{userId} and status != 'DELETED' order by create_time desc
     </select>
 
     <select id="selectByFileName" resultType="steveluxor.ragknowledgesystem.entity.Document">

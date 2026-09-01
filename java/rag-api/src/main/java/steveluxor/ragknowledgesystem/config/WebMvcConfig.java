@@ -27,7 +27,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(internalServiceInterceptor)
-                .addPathPatterns("/document/internal/summaries/**");
+                .addPathPatterns("/document/internal/summaries/**", "/document/internal/index-events/**", "/document/*/index-ready");
 
         // 登录拦截器
         registry.addInterceptor(loginInterceptor)
@@ -38,6 +38,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/document/*/status",
                         "/document/*/download",
                         "/document/internal/summaries/**",
+                        "/document/internal/index-events/**",
+                        "/document/*/index-ready",
                         "/charts/**",
                         "/qa/callback"
                 );
@@ -51,6 +53,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/document/*/status",
                         "/document/*/download",
                         "/document/internal/summaries/**",
+                        "/document/internal/index-events/**",
+                        "/document/*/index-ready",
                         "/charts/**",
                         "/qa/callback"
                 );

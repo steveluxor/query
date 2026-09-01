@@ -145,7 +145,7 @@ class CriticAgent(ControllerAgent):
             analysis_text = "  无"
 
         return PromptManager.get("critic", "slim_evaluate").format(
-            question=context.question,
+            question=context.resolved_question or context.question,
             answer=generated_answer,
             evidence=evidence_text,
             analysis=analysis_text,
